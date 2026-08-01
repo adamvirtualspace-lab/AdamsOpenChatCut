@@ -238,9 +238,25 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
           { key: 'stock/freesound', vendor: 'freesound', title: 'Freesound', fields: [secret('FREESOUND_API_KEY', 'API Key')] },
         ] },
       { key: 'transcription', title: '转写 / 口播剪辑', hint: 'transcribe_track · 词级字幕、清口水、删词。',
+        route: routeSelect('TRANSCRIPTION_PROVIDER', [
+          { value: 'assemblyai', label: 'AssemblyAI（云端）' },
+          { value: 'whisper', label: 'Whisper（本地）' },
+        ]),
         vendors: [
           { key: 'transcription/assemblyai', vendor: 'assemblyai', title: 'AssemblyAI',
             fields: [secret('ASSEMBLYAI_API_KEY', 'API Key')] },
+          { key: 'transcription/whisper', vendor: 'whisper', title: 'Whisper（本地）',
+            note: '使用 OpenAI Whisper 模型在本地转写。首次使用需下载约 150MB 的模型文件（仅一次）。无需 API Key，离线可用，但无说话人分离。',
+            fields: [
+              { name: 'WHISPER_MODEL', label: '模型大小', kind: 'select', defaultLabel: 'tiny（最快）',
+                options: [
+                  { value: 'tiny', label: 'tiny（~150MB·最快）' },
+                  { value: 'base', label: 'base（~300MB·均衡）' },
+                  { value: 'small', label: 'small（~600MB·更准）' },
+                  { value: 'medium', label: 'medium（~1.5GB·推荐）' },
+                  { value: 'large', label: 'large（~3GB·最准）' },
+                ] },
+            ] },
         ] },
     ],
   },
@@ -379,6 +395,8 @@ const ROUTE_NEEDS: Record<string, readonly (readonly string[])[]> = {
   kling: [['KLING_API_KEY']],
   hailuo: [['MINIMAX_API_KEY']],
   mureka: [['MUREKA_API_KEY']],
+  assemblyai: [['ASSEMBLYAI_API_KEY']],
+  whisper: [],
 };
 
 /** Routing drop-down option copy: Add the "(not configured)" suffix when the provider has not configured it, and it is still optional (there is a fallback inquiry guardrail on the Agent side).

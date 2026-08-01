@@ -83,6 +83,8 @@ const MODEL_ROUTING_NAMES = [
   'R2_ENABLED', // Cloud synchronization switch (''=enable/'0'=disable)
   'R2_PRESIGN', // Browser pre-signed direct transmission (''=enabled/'0'=server-side write-through only)
   'MEDIA_DIR',  // Asset saving directory (''=default public/media/uploads)
+  'TRANSCRIPTION_PROVIDER', // ASR route: ''/assemblyai = cloud, 'whisper' = local
+  'WHISPER_MODEL',          // Local Whisper size: tiny|base|small|medium|large
 ] as const;
 for (const name of MODEL_ROUTING_NAMES) {
   assert.ok((KEY_NAMES as readonly string[]).includes(name), `${name} is whitelisted (settable via POST /api/keys)`);

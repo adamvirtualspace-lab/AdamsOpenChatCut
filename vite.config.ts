@@ -15,6 +15,7 @@ export default defineConfig(({ mode }) => {
   // startup snapshot for the `define` (initial agent capability manifest).
   seedKeystore(env);
   const aaiKey = env.ASSEMBLYAI_API_KEY || '';
+  const transcriptionProvider = env.TRANSCRIPTION_PROVIDER || '';
   const imageKey = env.IMAGE_API_KEY || env.OPENAI_API_KEY || '';
   const geminiKey = env.GEMINI_API_KEY || '';
   const elevenKey = env.ELEVENLABS_API_KEY || '';
@@ -46,7 +47,7 @@ export default defineConfig(({ mode }) => {
         music: Boolean(murekaKey || minimaxKey),
         sound: Boolean(elevenKey),
         stock: Boolean(pexelsKey || pixabayKey || unsplashKey || freesoundKey),
-        transcription: Boolean(aaiKey),
+        transcription: Boolean(aaiKey) || transcriptionProvider === 'whisper',
         sandbox: Boolean(e2bKey),
         web: Boolean(firecrawlKey),
       }),

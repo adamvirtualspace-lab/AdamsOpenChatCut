@@ -80,6 +80,8 @@ export const KEY_NAMES = [
   "UNSPLASH_ACCESS_KEY",
   "FREESOUND_API_KEY",
   "ASSEMBLYAI_API_KEY",
+  "TRANSCRIPTION_PROVIDER",
+  "WHISPER_MODEL",
   "E2B_API_KEY",
   "E2B_TEMPLATE",
   "FIRECRAWL_API_KEY",
@@ -139,6 +141,8 @@ export const NON_SECRET_NAMES: ReadonlySet<string> = new Set([
   "R2_ENABLED", // Cloud synchronization switch ('' default = enabled, '0' = disabled) - configuration is not credentials
   "R2_PRESIGN", // Browser pre-signed direct transmission ('' default = enabled, '0' = server-side write-through only)
   "MEDIA_DIR", // Asset saving directory (local path, '' = default public/media/uploads) - configuration is not credentials
+  "TRANSCRIPTION_PROVIDER",
+  "WHISPER_MODEL",
   ...LLM_PROVIDER_PRESETS.flatMap((preset) => {
     const names = llmProviderConfigNames(preset.id);
     return [names.baseUrl, names.model];
@@ -241,7 +245,7 @@ export function computeCaps(): Caps {
       has("UNSPLASH_ACCESS_KEY") ||
       has("FREESOUND_API_KEY") ||
       has("FIRECRAWL_API_KEY"),
-    transcription: has("ASSEMBLYAI_API_KEY"),
+    transcription: has("ASSEMBLYAI_API_KEY") || getKey("TRANSCRIPTION_PROVIDER") === "whisper",
     sandbox: has("E2B_API_KEY"),
     web: has("FIRECRAWL_API_KEY"),
     storage:
