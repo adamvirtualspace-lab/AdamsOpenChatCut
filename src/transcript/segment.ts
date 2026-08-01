@@ -1,4 +1,5 @@
 import type { TranscriptWord } from './types';
+import { t } from '../i18n/locale';
 
 // A word plus its global index in the flat transcript (so a click in any view
 // maps back to the one word to delete).
@@ -12,10 +13,11 @@ export interface WordGroup {
 }
 
 // 'A' → 'Speaker 1', 'B' → 'Speaker 2', … (AssemblyAI diarization codes).
+// Rendered in the transcript panel, so it goes through t() like any other label.
 export function speakerLabel(code: string | null | undefined): string {
-  if (!code) return '说话人';
+  if (!code) return t('说话人');
   const n = code.charCodeAt(0) - 65;
-  return Number.isFinite(n) && n >= 0 ? `说话人 ${n + 1}` : `说话人 ${code}`;
+  return Number.isFinite(n) && n >= 0 ? t('说话人 {n}', { n: n + 1 }) : t('说话人 {n}', { n: code });
 }
 
 /** Whether a string is mostly CJK (no space between word chips). */
