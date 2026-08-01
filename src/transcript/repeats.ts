@@ -37,6 +37,12 @@ export interface CollapseResult {
   suspectLoops: { text: string; count: number; startMs: number; endMs: number }[];
 }
 
+/** Above this, no verification can make a run credible: 4 repeats per second is
+ * faster than the word can be articulated. Whisper reproduces some of these
+ * across every temperature, so "an independent pass agreed" is not evidence of
+ * real speech here — it is the same failure repeating. */
+export const IMPOSSIBLE_REPEATS_PER_SECOND = 3.5;
+
 const DEFAULTS: Required<CollapseOptions> = {
   // 2.0 catches the observed artifacts down to "Kayu." (2.01/s) while leaving
   // every run that reads as real speech (<= 1.3/s) alone.

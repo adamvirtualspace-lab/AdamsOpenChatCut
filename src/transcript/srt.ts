@@ -116,7 +116,13 @@ function cueWords(cue: SrtCue, floorMs: number): TranscriptWord[] {
     const share = total > 0 ? (token.length / total) * span : span / tokens.length;
     // Last word absorbs rounding drift so the cue ends exactly on endMs.
     const wordEnd = n === tokens.length - 1 ? end : Math.min(end, Math.round(cursor + share));
-    words.push({ text: token, start: Math.round(cursor), end: Math.max(wordEnd, Math.round(cursor) + 1) });
+    words.push({
+      text: token,
+      start: Math.round(cursor),
+      end: Math.max(wordEnd, Math.round(cursor) + 1),
+      // Keep the cue boundary: it is where the engine chose to break the line.
+      ...(n === 0 ? { lineStart: true as const } : {}),
+    });
     cursor = wordEnd;
   });
   return words;

@@ -5,6 +5,11 @@ export interface TranscriptWord {
   start: number; // ms
   end: number; // ms
   speaker?: string | null; // 'A' | 'B' | ... when diarization is on
+  /** First word of a source subtitle cue. Set when the transcript came from an
+   * .srt/.vtt import or from whisper.cpp --max-len, where the engine already
+   * decided where lines break. Without it those boundaries are lost and the
+   * script view re-merges everything, since it can only break on pauses. */
+  lineStart?: boolean;
 }
 
 /** One speaker turn (AssemblyAI utterance) = a "segment" in segment view. */

@@ -187,6 +187,11 @@ export function buildScriptRows(
       flushSpeech();
       speaker = cur.speaker ?? '';
       speech = [cur];
+    } else if (cur.lineStart) {
+      // Source cue boundary (SRT import / whisper --max-len). No Gap row: nothing
+      // was removed, the engine simply ended the line here.
+      flushSpeech();
+      speech = [cur];
     } else {
       speech.push(cur);
     }

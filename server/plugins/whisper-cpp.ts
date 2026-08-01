@@ -17,7 +17,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getKey } from '../keystore.ts';
 import { srtToTranscript } from '../../src/transcript/srt.ts';
-import { findRepeatRuns, normalize, type RepeatRun } from '../../src/transcript/repeats.ts';
+import { IMPOSSIBLE_REPEATS_PER_SECOND, collapseRepeats, findRepeatRuns, normalize, type RepeatRun } from '../../src/transcript/repeats.ts';
 import type { TranscriptResult, TranscriptWord } from '../../src/transcript/types.ts';
 
 const DEFAULT_ROOT = join(homedir(), 'whisper.cpp');
@@ -411,6 +411,7 @@ export async function transcribeWithCpp(
     const runs = findRepeatRuns(words);
     let repaired = 0;
     let confirmed = 0;
+    let forced = 0;
     for (const run of runs.slice(0, MAX_REPAIR_WINDOWS)) {
       const from = Math.max(0, run.startMs / 1000 - REPAIR_PAD_SEC);
       const to = run.endMs / 1000 + REPAIR_PAD_SEC;
@@ -418,12 +419,17 @@ export async function transcribeWithCpp(
       if (fixed) {
         words = spliceWindow(words, from * 1000, to * 1000, fixed);
         repaired += 1;
+      } else if (run.rate >= IMPOSSIBLE_REPEATS_PER_SECOND) {
+        // Every attempt agreed — but at this rate the word cannot be spoken, so
+        // the agreement is the same failure recurring, not evidence. Collapse.
+        words = collapseRepeats(words, { maxRepeatsPerSecond: IMPOSSIBLE_REPEATS_PER_SECOND }).words;
+        forced += 1;
       } else {
         confirmed += 1;
       }
     }
     if (runs.length) {
-      opts.onNote?.(`repeat runs: ${runs.length}, rewritten ${repaired}, confirmed real ${confirmed}`);
+      opts.onNote?.(`repeat runs: ${runs.length}, rewritten ${repaired}, collapsed as impossible ${forced}, confirmed real ${confirmed}`);
     }
 
     return { ...result, words, text: words.map((w) => w.text).join(' ') };
