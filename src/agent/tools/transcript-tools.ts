@@ -1,8 +1,30 @@
 import type { AgentToolSchema } from '../tool-schema';
 import type { AgentContext } from '../context';
 import { defaultTrackId, resolveTrackId, trackAlias, type TimelineItem, type TrackId } from '../../editor/types';
-import { transcribePath } from '../../transcript/assemblyai';
+import { transcribePath as assemblyaiTranscribePath } from '../../transcript/assemblyai';
+import { transcribePath as whisperTranscribePath } from '../../transcript/whisper';
+import type { TranscriptResult } from '../../transcript/types';
 import { fillerIndices } from '../../transcript/edit';
+import { srtToTranscript } from '../../transcript/srt';
+
+let cachedProvider: 'assemblyai' | 'whisper' | null = null;
+async function resolveProvider(): Promise<'assemblyai' | 'whisper'> {
+  if (cachedProvider) return cachedProvider;
+  try {
+    const r = await fetch('/api/keys');
+    if (r.ok) {
+      const data = await r.json() as { models?: Record<string, string> };
+      cachedProvider = data.models?.TRANSCRIPTION_PROVIDER === 'whisper' ? 'whisper' : 'assemblyai';
+      return cachedProvider;
+    }
+  } catch { /* fall through */ }
+  return 'assemblyai';
+}
+
+function transcribeForProvider(path: string, opts?: { languageCode?: string }): Promise<TranscriptResult> {
+  const fn = cachedProvider === 'whisper' ? whisperTranscribePath : assemblyaiTranscribePath;
+  return fn(path, undefined, { languageCode: opts?.languageCode });
+}
 import { translateLines } from '../../captions/translate';
 import { createVariant, findVariantByLang, upsertVariant } from '../../transcript/variants';
 import { buildSilenceGapCaps, parseCleanOnly, parseSilenceRule, type SilenceRule } from '../../transcript/clean';
@@ -32,8 +54,22 @@ export const TRANSCRIPT_TOOL_SCHEMAS: AgentToolSchema[] = [
   },
   {
     name: 'transcribe_track',
-    description: 'Transcribe the audio clip on a track (word-level + speaker labels, via AssemblyAI) and attach the transcript. Required before find_transcript / clean_script / delete_text / captions when the clip has no transcript yet.',
+    description: 'Transcribe every audio/video clip on a track — word-level timestamps, using the configured provider (AssemblyAI cloud or local Whisper). This is THE tool for transcription; never try to run ffmpeg or Whisper manually in a sandbox. Required before find_transcript / clean_script / delete_text / captions when clips have no transcript yet.',
     input_schema: { type: 'object', properties: { track: { type: 'string', description: 'Track alias or stable id whose audio to transcribe (default A1).' } } },
+  },
+  {
+    name: 'import_transcript',
+    description: 'Attach an existing SubRip (.srt) or WebVTT (.vtt) subtitle file to a clip as its word-level transcript, INSTEAD of running ASR. Use when the user already has a subtitle file — it is faster than transcribe_track and keeps their own wording, timings, and language. Cue spans are divided across words by length, so find_transcript / clean_script / delete_text / captions all work afterwards. Provide the file with `srt` (raw text) or `path` (a /media/uploads/... URL served by this app). Targets one clip via itemId, else the first audio/video clip on `track`. Subtitle times are treated as offsets into the clip SOURCE, so the file must match the clip it is attached to.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        srt: { type: 'string', description: 'Raw .srt/.vtt file contents. Use this OR path.' },
+        path: { type: 'string', description: 'App-served subtitle URL, e.g. /media/uploads/clip.srt. Use this OR srt.' },
+        itemId: { type: 'string', description: 'Target clip id or unique prefix. Omit to use the first audio/video clip on the track.' },
+        track: { type: 'string', description: 'Track alias/id used when itemId is omitted (default A1).' },
+        replace: { type: 'boolean', description: 'Overwrite an existing transcript on the clip (default false — an existing transcript is left alone).' },
+      },
+    },
   },
   {
     name: 'find_transcript',
@@ -243,7 +279,8 @@ async function manageTranscript(args: Args, ctx: AgentContext, track: TrackId, a
   if (action === 'retry_transcription') {
     if (!it.src) return { error: `item ${it.id} has no media to transcribe` };
     try {
-      const r = await transcribePath(it.src, undefined, { languageCode: 'zh' });
+      await resolveProvider();
+      const r = await transcribeForProvider(it.src, { languageCode: 'zh' });
       ctx.commands.setItemTranscript(it.id, r.words);
       return { ok: true, action, itemId: it.id, words: r.words.length, text: r.text.slice(0, 200), retried: true };
     } catch (e) {
@@ -315,16 +352,97 @@ async function manageTranscript(args: Args, ctx: AgentContext, track: TrackId, a
   return { error: `unsupported action "${action}"; use fix / retry_transcription / translation_create / translation_ensure / translation_list / translation_read` };
 }
 
+/** Attach a user-supplied .srt/.vtt to a clip instead of running ASR.
+ * Their wording, their timings, their language — and far faster than transcribing. */
+async function execImportTranscript(args: Args, ctx: AgentContext): Promise<unknown> {
+  const state = ctx.getState();
+
+  let text = typeof args.srt === 'string' ? args.srt : '';
+  const path = typeof args.path === 'string' ? args.path.trim() : '';
+  if (!text && path) {
+    if (!path.startsWith('/media/')) return { error: 'path must be an app-served /media/... URL' };
+    try {
+      const res = await fetch(path);
+      if (!res.ok) return { error: `could not read ${path}: HTTP ${res.status}` };
+      text = await res.text();
+    } catch (e) {
+      return { error: `could not read ${path}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  if (!text.trim()) return { error: 'provide the subtitle file as srt (text) or path (/media/... URL)' };
+
+  const isMedia = (x: TimelineItem): boolean => x.kind === 'audio' || x.kind === 'video';
+  const targetId = typeof args.itemId === 'string' ? args.itemId : '';
+  let clip: TimelineItem | undefined;
+  if (targetId) {
+    clip = state.items.find((x) => x.id === targetId || x.id.startsWith(targetId));
+    if (!clip) return { error: `no item ${targetId}` };
+    if (!isMedia(clip)) return { error: `item ${clip.id} is a ${clip.kind}, not audio/video` };
+  } else {
+    // No itemId: prefer the named track, but fall back to any media clip on the
+    // timeline so a video-only project still works without an A1 track.
+    const track = resolveTrackId(state, args.track ?? 'A1') ?? defaultTrackId(state, 'audio');
+    const onTrack = state.items.filter((x) => isMedia(x) && x.track === track);
+    const candidates = (onTrack.length ? onTrack : state.items.filter(isMedia))
+      .sort((a, b) => a.startFrame - b.startFrame);
+    clip = candidates[0];
+    if (!clip) return { error: 'no audio/video clip on the timeline to attach a transcript to' };
+  }
+
+  const had = clip.transcript?.length ?? 0;
+  if (had && args.replace !== true) {
+    return { error: `item ${clip.id} already has a transcript (${had} words); pass replace:true to overwrite` };
+  }
+
+  let parsed;
+  try {
+    parsed = srtToTranscript(text);
+  } catch (e) {
+    return { error: `subtitle parse failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!parsed.words.length) return { error: 'no usable cues found in the subtitle file' };
+
+  ctx.commands.setItemTranscript(clip.id, parsed.words);
+
+  // Surface a duration mismatch rather than silently attaching a transcript that
+  // runs past the clip — that usually means the file belongs to different media.
+  const fps = state.fps || 30;
+  const clipMs = Math.round((clip.durationInFrames / fps) * 1000);
+  const lastMs = parsed.words[parsed.words.length - 1].end;
+  return {
+    ok: true,
+    itemId: clip.id,
+    name: clip.name,
+    words: parsed.words.length,
+    firstWordMs: parsed.words[0].start,
+    lastWordMs: lastMs,
+    clipDurationMs: clipMs,
+    replaced: had > 0,
+    text: parsed.text.slice(0, 200),
+    ...(lastMs > clipMs
+      ? { warning: `subtitles run ${Math.round((lastMs - clipMs) / 1000)}s past the end of the clip — check the file matches this media` }
+      : {}),
+  };
+}
+
 // Execute a transcript/caption tool. Returns undefined if `name` isn't one of ours.
 export async function execTranscriptTool(name: string, args: Args, ctx: AgentContext): Promise<unknown | undefined> {
   if (name === 'read_transcript') return execReadTranscript(args, ctx);
+  // Runs before the A1 default below: a subtitle file targets a CLIP, and that clip
+  // is often a video on V1 with no audio track in the project at all.
+  if (name === 'import_transcript') return execImportTranscript(args, ctx);
   const state = ctx.getState();
-  const track = resolveTrackId(state, args.track ?? 'A1') ?? defaultTrackId(state, 'audio');
+  // Speech usually lives on A1, but a project can be video-only (a camera file with
+  // its own audio on V1). Falling back to the video track keeps find_transcript /
+  // clean_script / delete_text usable there instead of failing on a missing A1.
+  const track = resolveTrackId(state, args.track ?? 'A1')
+    ?? defaultTrackId(state, 'audio')
+    ?? defaultTrackId(state, 'video');
   if (!track) return { error: 'no track available; create one with edit_track first' };
   const alias = trackAlias(state, track);
   switch (name) {
     case 'transcribe_track': {
-      // Transcribe ALL audio/video clips on the track (not just the first).
+      await resolveProvider();
       const clips = ctx.getState().items
         .filter((it) => (it.kind === 'audio' || it.kind === 'video') && it.track === track && it.src)
         .sort((a, b) => a.startFrame - b.startFrame);
@@ -336,7 +454,7 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
             results.push({ itemId: it.id, words: it.transcript.length, text: '', skipped: true });
             continue;
           }
-          const r = await transcribePath(it.src!, undefined, { languageCode: 'zh' });
+          const r = await transcribeForProvider(it.src!, { languageCode: 'zh' });
           ctx.commands.setItemTranscript(it.id, r.words);
           results.push({ itemId: it.id, words: r.words.length, text: r.text.slice(0, 200) });
         }
