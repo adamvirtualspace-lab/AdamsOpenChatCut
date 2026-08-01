@@ -330,7 +330,8 @@ The playhead line/triangle is pointerEvents:none, click it to click the ruler - 
             const locked = config.locked ?? false;
             const kindLabel = meta.kind === 'video' ? '视频' : meta.kind === 'audio' ? '音频' : '字幕';
             const trackName = config.name || `${t(kindLabel)} ${alias.slice(1)}`;
-            const busy = items.length > 0 || !!trackCaptions
+            // Caption data does not count as content — see reduce.ts track.delete.
+            const busy = items.length > 0
               || (state.transitions ?? []).some((transition) => transition.trackId === trackId);
             return (
               <div key={trackId} className="cc-track-row" style={{ height: rowHeightOf(trackId), background: isDropTarget ? `color-mix(in srgb, ${theme.success} 15%, ${theme.bg})` : undefined }}>

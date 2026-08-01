@@ -123,9 +123,9 @@ export async function execTrackTool(name: string, args: Args, ctx: AgentContext)
       const ids = refs.map((ref) => resolveTrackId(state, ref));
       if (ids.some((id) => !id)) return { error: 'one or more tracks do not exist', tracks: list(state) };
       const unique = [...new Set(ids as TrackId[])];
+      // Caption data is not "content" for this purpose — see reduce.ts track.delete.
       const busy = unique.filter((id) => state.items.some((item) => item.track === id)
-        || (state.transitions ?? []).some((transition) => transition.trackId === id)
-        || !!captionsOnTrack(state, id));
+        || (state.transitions ?? []).some((transition) => transition.trackId === id));
       if (busy.length) return { error: 'track is not empty', tracks: busy.map((id) => describe(state, id)) };
       ctx.commands.deleteTracks(unique);
       return { ok: true, deleted: unique, tracks: list(ctx.getState()) };

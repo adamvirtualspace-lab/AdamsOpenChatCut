@@ -74,6 +74,9 @@ export type Action =
   | { type: 'updateCaptions'; patch: Partial<CaptionsData>; track?: TrackId }
   | { type: 'updateWatermark'; patch: Partial<Watermark> }
   | { type: 'setItemTranscript'; id: string; words: TranscriptWord[] }
+  /** Drop a clip's transcript and everything derived from it (word cuts, gap caps,
+   * play order, variants), restoring the clip to its un-edited length. */
+  | { type: 'clearTranscript'; id: string }
   | { type: 'setItemVariants'; id: string; variants: TranscriptVariant[] }
   | { type: 'toggleWord'; id: string; idx: number }
   | { type: 'deleteWords'; id: string; idxs: number[] }
@@ -148,7 +151,7 @@ export type Dispatch = (a: Action | BatchAction | HistoryControlAction) => void;
 /** dispatch at the project level: per-timeline + project actions + history control */
 export type ProjectDispatch = (a: AnyAction | HistoryControlAction) => void;
 
-const MUTATING = new Set(['add', 'updateProps', 'move', 'retime', 'setVolume', 'setFade', 'setTransform', 'setFilters', 'setZoom', 'setEffects', 'setSpeed', 'replaceMedia', 'reframeKeyframe', 'removeReframeKeyframe', 'setKeyframe', 'removeKeyframe', 'clearKeyframes', 'addTransition', 'setTransition', 'removeTransition', 'addMarker', 'updateMarker', 'removeMarker', 'duplicate', 'remove', 'split', 'clear', 'addAsset', 'setCanvas', 'toggleTrack', 'track.create', 'track.update', 'track.delete', 'track.tighten', 'setCaptions', 'updateCaptions', 'updateWatermark', 'setItemTranscript', 'setItemVariants', 'toggleWord', 'deleteWords', 'cleanScript', 'setGapCap', 'setTranscriptPlayOrder', 'reorderTrackItems', 'clearEdits', 'fixTranscriptWord', 'renameSpeaker', 'setItemDenoise', 'setFullState',
+const MUTATING = new Set(['add', 'updateProps', 'move', 'retime', 'setVolume', 'setFade', 'setTransform', 'setFilters', 'setZoom', 'setEffects', 'setSpeed', 'replaceMedia', 'reframeKeyframe', 'removeReframeKeyframe', 'setKeyframe', 'removeKeyframe', 'clearKeyframes', 'addTransition', 'setTransition', 'removeTransition', 'addMarker', 'updateMarker', 'removeMarker', 'duplicate', 'remove', 'split', 'clear', 'addAsset', 'setCanvas', 'toggleTrack', 'track.create', 'track.update', 'track.delete', 'track.tighten', 'setCaptions', 'updateCaptions', 'updateWatermark', 'setItemTranscript', 'clearTranscript', 'setItemVariants', 'toggleWord', 'deleteWords', 'cleanScript', 'setGapCap', 'setTranscriptPlayOrder', 'reorderTrackItems', 'clearEdits', 'fixTranscriptWord', 'renameSpeaker', 'setItemDenoise', 'setFullState',
   // project-level (tl.switch is navigation → deliberately NOT here, so it makes no history step)
   'tl.create', 'tl.duplicate', 'tl.delete', 'tl.rename', 'tl.retarget', 'tl.setHidden', 'tl.setDoc',
   'pool.createFolder', 'pool.renameFolder', 'pool.deleteFolder', 'pool.moveAssets', 'pool.updateAsset', 'pool.setTranscription', 'pool.relinkAsset', 'pool.removeAsset']);
@@ -556,8 +559,12 @@ function applyAction(s: TimelineState, a: Action): TimelineState {
     }
     case 'track.delete': {
       const remove = new Set(a.tracks);
-      const ownsCaptions = [...remove].some((id) => !!captionsOnTrack(s, id));
-      if (!remove.size || ownsCaptions || s.items.some((item) => remove.has(item.track)) || (s.transitions ?? []).some((transition) => remove.has(transition.trackId))) return s;
+      // Caption data does NOT block deletion. It is a caption track's only content,
+      // and nothing can clear it (edit_captions `disable` only flips `enabled`), so
+      // treating it as "not empty" made caption tracks permanently undeletable by
+      // every route. Deleting the track drops its captions with it; the primary
+      // rebind below keeps legacy `s.captions` consistent afterwards.
+      if (!remove.size || s.items.some((item) => remove.has(item.track)) || (s.transitions ?? []).some((transition) => remove.has(transition.trackId))) return s;
       const ids = timelineTrackIds(s);
       const remaining = ids.filter((id) => !remove.has(id));
       if (!remaining.some((id) => trackKind(s, id) === 'video')) return s;
@@ -605,6 +612,39 @@ function applyAction(s: TimelineState, a: Action): TimelineState {
             : it,
         ),
       };
+    case 'clearTranscript': {
+      const target = s.items.find((it) => it.id === a.id);
+      if (!target?.transcript) return s;
+      // Word cuts only exist as transcript edit state, so a clip cannot stay
+      // shortened once the transcript is gone. Restore length the same way
+      // clearEdits does — but ONLY when edits actually shortened it, since
+      // recomputing from the word span would otherwise trim a clip whose media
+      // runs past its last word (see the setItemTranscript note above).
+      const wasEdited = (target.deletedWordIdx?.length ?? 0) > 0
+        || target.silenceFrames !== undefined
+        || target.gapCapsMs !== undefined
+        || target.transcriptPlayOrder !== undefined;
+      const restored = wasEdited
+        ? editedFrames(target.transcript, new Set(), s.fps)
+        : target.durationInFrames;
+      return {
+        ...s,
+        items: s.items.map((it) =>
+          it.id === a.id
+            ? {
+              ...it,
+              transcript: undefined,
+              variants: undefined,
+              deletedWordIdx: [],
+              silenceFrames: undefined,
+              gapCapsMs: undefined,
+              transcriptPlayOrder: undefined,
+              durationInFrames: restored,
+            }
+            : it,
+        ),
+      };
+    }
     case 'setItemVariants':
       // Replace the item's text-only transcript variants. Purely additive metadata:
       // it touches neither transcript words, timings, nor durationInFrames.

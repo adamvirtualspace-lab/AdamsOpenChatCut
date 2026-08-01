@@ -26,6 +26,8 @@ interface TranscriptPanelProps {
   onSetTranscriptPlayOrder: (id: string, playOrder: number[] | null) => void;
   onReorderTrackItems: (track: TrackId, orderedIds: string[]) => void;
   onClearEdits: (id: string) => void;
+  /** Drop a clip's transcript entirely, and everything derived from it. */
+  onClearTranscript: (id: string) => void;
   onOpenCaptionStyles?: (sourceItemIds: string[]) => void;
 }
 
@@ -34,6 +36,7 @@ const MANY_CLIPS = 10;
 export function TranscriptPanel({
   playerRef, fps, items, trackOptions,
   onSetItemTranscript, onToggleWord, onCleanScript, onSetGapCap, onSetTranscriptPlayOrder, onReorderTrackItems, onClearEdits,
+  onClearTranscript,
   onOpenCaptionStyles,
 }: TranscriptPanelProps) {
   const t = useT();
@@ -170,6 +173,23 @@ export function TranscriptPanel({
         >
           <Icon name="captions" size={13} />{t('字幕样式')}
         </button>
+        <button
+          type="button"
+          className="cc-tx-btn"
+          disabled={!transcribed.length}
+          title={transcribed.length ? t('删除该轨的文字稿（可撤销）') : t('该轨还没有文字稿')}
+          onClick={() => {
+            // Destructive and not obvious from the label alone: this drops word
+            // cuts and pause edits with the transcript. Undoable, but confirm.
+            const count = transcribed.length;
+            if (!window.confirm(t('删除 {n} 个片段的文字稿？由文字稿产生的删词与停顿编辑会一并撤销。', { n: count }))) return;
+            for (const item of transcribed) onClearTranscript(item.id);
+            setEditMode(false);
+            setPauseResult(null);
+          }}
+        >
+          <Icon name="trash" size={13} />{t('删除文字稿')}
+        </button>
         <span className="cc-tx-spacer" />
         {pauseOpen && (
           <div className="cc-tx-popover">
@@ -242,7 +262,7 @@ export function TranscriptPanel({
             <div className="cc-tx-empty-kicker">{aliasLabel}</div>
             <div className="cc-tx-empty-title">{t('转写词级文字稿')}</div>
             <p className="cc-tx-muted">
-              {t('中文词级转写 · 说话人分离 · 该轨共 {n} 段会逐段上传。转写后可点词删减（删词=剪音频）。', { n: clips.length })}
+              {t('词级转写 · 该轨共 {n} 段会逐段处理。转写后可点词删减（删词=剪音频）。', { n: clips.length })}
             </p>
             {skippedMusic > 0 && (
               <label className="cc-tx-check music">
