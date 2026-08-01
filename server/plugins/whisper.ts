@@ -302,6 +302,7 @@ export function whisperPlugin(): Plugin {
               onProgress: (doneSec) => {
                 progress = { ...progress, doneSec: Math.min(progress.totalSec || doneSec, doneSec) };
               },
+              onNote: (note) => server.config.logger.info(`[whisper.cpp] ${note}`),
             });
             progress = { ...progress, active: false, doneSec: progress.totalSec, phase: 'done' };
             sendJson(res, 200, { ...result, engine: 'whisper.cpp' });

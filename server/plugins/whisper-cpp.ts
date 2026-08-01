@@ -17,7 +17,8 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { getKey } from '../keystore.ts';
 import { srtToTranscript } from '../../src/transcript/srt.ts';
-import type { TranscriptResult } from '../../src/transcript/types.ts';
+import { findRepeatRuns, normalize, type RepeatRun } from '../../src/transcript/repeats.ts';
+import type { TranscriptResult, TranscriptWord } from '../../src/transcript/types.ts';
 
 const DEFAULT_ROOT = join(homedir(), 'whisper.cpp');
 
@@ -180,6 +181,115 @@ export interface CppRunOptions {
   threads?: number;
   /** Called with the furthest audio-second whisper.cpp has emitted so far. */
   onProgress?: (doneSec: number) => void;
+  /** Diagnostics worth logging (e.g. how many repeat runs were repaired). */
+  onNote?: (note: string) => void;
+}
+
+/** Bounded so a pathological file cannot turn into hundreds of extra passes.
+ * Windows are 1-3s and whisper.cpp runs ~23x realtime, so this is cheap. */
+const MAX_REPAIR_WINDOWS = 48;
+/** Attempts per window before concluding the repetition is genuine. Retries
+ * raise the temperature, since an identical re-run is deterministic and would
+ * just reproduce the same output. */
+const REPAIR_TEMPERATURES = [0, 0.2, 0.4, 0.6];
+/** Context around the run; the decoder needs a run-up to latch on. */
+const REPAIR_PAD_SEC = 2;
+
+/**
+ * Re-transcribe one window up to REPAIR_TEMPERATURES.length times, looking for a
+ * pass that does NOT reproduce the repetition.
+ *
+ * Returns the corrected words, or null when every attempt still repeats — which
+ * is the useful answer too: the repetition is really in the audio, so the caller
+ * keeps the original rather than deleting speech that was actually said.
+ */
+async function repairWindow(
+  status: CppStatus,
+  wavPath: string,
+  dir: string,
+  fromSec: number,
+  toSec: number,
+  language: string,
+  run: RepeatRun,
+): Promise<TranscriptWord[] | null> {
+  const target = normalize(run.text);
+  for (let attempt = 0; attempt < REPAIR_TEMPERATURES.length; attempt++) {
+    try {
+      const words = await transcribeWindow(
+        status, wavPath, dir, fromSec, toSec, language,
+        REPEAT_TEMP(attempt), attempt,
+      );
+      if (!words.length) continue;
+      // Accept a rewrite only if it is strictly cleaner. Checking just the target
+      // word is not enough: a higher temperature can drop THIS stutter while
+      // hallucinating a different one, which is how repairs were importing new
+      // runs ("No," 12x) that the original pass never produced.
+      const fresh = findRepeatRuns(words);
+      const stillRepeats = fresh.some((r) => normalize(r.text) === target);
+      if (!stillRepeats && fresh.length === 0) return words;
+    } catch {
+      // Treat a failed attempt as inconclusive and try the next temperature.
+    }
+  }
+  return null;
+}
+
+const REPEAT_TEMP = (attempt: number): number =>
+  REPAIR_TEMPERATURES[Math.min(attempt, REPAIR_TEMPERATURES.length - 1)];
+
+/** Re-transcribe one window of the already-decoded WAV, returned on the
+ * ORIGINAL timeline (whisper reports from zero within the cut). */
+async function transcribeWindow(
+  status: CppStatus,
+  wavPath: string,
+  dir: string,
+  fromSec: number,
+  toSec: number,
+  language: string,
+  temperature: number,
+  attempt: number,
+): Promise<TranscriptWord[]> {
+  const cut = join(dir, `repair-${Math.round(fromSec)}-${attempt}.wav`);
+  const base = join(dir, `repair-${Math.round(fromSec)}-${attempt}`);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn('ffmpeg', [
+      '-nostdin', '-hide_banner', '-loglevel', 'error',
+      '-ss', String(fromSec), '-t', String(Math.max(1, toSec - fromSec)),
+      '-i', wavPath, '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', '-y', cut,
+    ], { stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`ffmpeg cut exit ${code}`))));
+  });
+
+  const args = ['-m', status.model, '-f', cut, '-of', base, '-osrt',
+    '-l', language || 'auto', '-t', '8',
+    '--entropy-thold', '2.4', '--logprob-thold', '-1.0',
+    // A deterministic re-run reproduces the same stutter, so each retry warms up.
+    '-tp', String(temperature)];
+  if (status.vadPresent) args.push('--vad', '--vad-model', status.vadModel);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(status.bin, args, { cwd: status.root, stdio: 'ignore' });
+    child.on('error', reject);
+    child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`whisper-cli exit ${code}`))));
+  });
+
+  const offset = fromSec * 1000;
+  const { words } = srtToTranscript(await readFile(`${base}.srt`, 'utf8'));
+  return words.map((w) => ({
+    ...w, start: Math.round(w.start + offset), end: Math.round(w.end + offset),
+  }));
+}
+
+/** Replace every word inside [fromMs, toMs) with `replacement`, keeping order. */
+function spliceWindow(
+  words: readonly TranscriptWord[],
+  fromMs: number,
+  toMs: number,
+  replacement: readonly TranscriptWord[],
+): TranscriptWord[] {
+  const before = words.filter((w) => w.end <= fromMs);
+  const after = words.filter((w) => w.start >= toMs);
+  return [...before, ...replacement, ...after];
 }
 
 function decodeToWav(inputPath: string, wavPath: string): Promise<void> {
@@ -258,7 +368,32 @@ export async function transcribeWithCpp(
     // srtToTranscript already divides a cue across its words by length.
     const result = srtToTranscript(srt);
     if (!result.words.length) throw new Error('whisper.cpp produced no usable segments');
-    return result;
+
+    // Repeat runs ("Kayu Kayu Kayu Kayu") are usually a decode artifact, but not
+    // always — people really do repeat themselves. Rather than guess from the
+    // rate alone, VERIFY: re-transcribe just that window in isolation, where the
+    // decoder starts fresh. If the repetition survives an independent pass it is
+    // in the audio, so it is kept. Only a pass that disagrees replaces anything.
+    let words = [...result.words];
+    const runs = findRepeatRuns(words);
+    let repaired = 0;
+    let confirmed = 0;
+    for (const run of runs.slice(0, MAX_REPAIR_WINDOWS)) {
+      const from = Math.max(0, run.startMs / 1000 - REPAIR_PAD_SEC);
+      const to = run.endMs / 1000 + REPAIR_PAD_SEC;
+      const fixed = await repairWindow(status, wavPath, dir, from, to, opts.language, run);
+      if (fixed) {
+        words = spliceWindow(words, from * 1000, to * 1000, fixed);
+        repaired += 1;
+      } else {
+        confirmed += 1;
+      }
+    }
+    if (runs.length) {
+      opts.onNote?.(`repeat runs: ${runs.length}, rewritten ${repaired}, confirmed real ${confirmed}`);
+    }
+
+    return { ...result, words, text: words.map((w) => w.text).join(' ') };
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => undefined);
   }
