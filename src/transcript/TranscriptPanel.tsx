@@ -32,6 +32,8 @@ interface TranscriptPanelProps {
 }
 
 const MANY_CLIPS = 10;
+/** How long the delete button stays armed before reverting to its normal label. */
+const CONFIRM_MS = 4000;
 
 export function TranscriptPanel({
   playerRef, fps, items, trackOptions,
@@ -53,6 +55,10 @@ export function TranscriptPanel({
   const [pauseResult, setPauseResult] = useState<string | null>(null);
   const [focusItemId, setFocusItemId] = useState<string | null>(null);
   const [includeMusic, setIncludeMusic] = useState(false);
+  /** Delete transcript is armed by a first click; a second click within CONFIRM_MS commits. */
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const confirmTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (confirmTimer.current) window.clearTimeout(confirmTimer.current); }, []);
   /** many clips: default show only the focused section to keep the list usable */
   const [showAllSections, setShowAllSections] = useState(false);
   const dragClipFrom = useRef<string | null>(null);
@@ -175,20 +181,30 @@ export function TranscriptPanel({
         </button>
         <button
           type="button"
-          className="cc-tx-btn"
+          className={`cc-tx-btn${confirmDelete ? ' active' : ''}`}
           disabled={!transcribed.length}
           title={transcribed.length ? t('删除该轨的文字稿（可撤销）') : t('该轨还没有文字稿')}
           onClick={() => {
-            // Destructive and not obvious from the label alone: this drops word
-            // cuts and pause edits with the transcript. Undoable, but confirm.
-            const count = transcribed.length;
-            if (!window.confirm(t('删除 {n} 个片段的文字稿？由文字稿产生的删词与停顿编辑会一并撤销。', { n: count }))) return;
+            // Two-step inline confirm rather than window.confirm(): native dialogs
+            // are suppressed in embedded browsers (Electron/desktop webviews), where
+            // confirm() silently returns false and the button appears dead.
+            if (!confirmDelete) {
+              setConfirmDelete(true);
+              if (confirmTimer.current) window.clearTimeout(confirmTimer.current);
+              confirmTimer.current = window.setTimeout(() => setConfirmDelete(false), CONFIRM_MS);
+              return;
+            }
+            if (confirmTimer.current) window.clearTimeout(confirmTimer.current);
+            setConfirmDelete(false);
             for (const item of transcribed) onClearTranscript(item.id);
             setEditMode(false);
             setPauseResult(null);
           }}
         >
-          <Icon name="trash" size={13} />{t('删除文字稿')}
+          <Icon name="trash" size={13} />
+          {confirmDelete
+            ? t('确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销', { n: transcribed.length })
+            : t('删除文字稿')}
         </button>
         <span className="cc-tx-spacer" />
         {pauseOpen && (

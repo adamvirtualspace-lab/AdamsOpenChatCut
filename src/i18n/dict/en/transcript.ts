@@ -17,8 +17,8 @@ export default {
   '删除文字稿': 'Delete transcript',
   '删除该轨的文字稿（可撤销）': 'Delete this track\'s transcript (undoable)',
   '该轨还没有文字稿': 'This track has no transcript yet',
-  '删除 {n} 个片段的文字稿？由文字稿产生的删词与停顿编辑会一并撤销。':
-    'Delete the transcript for {n} clip(s)? Word cuts and pause edits made from it will be undone as well.',
+  '确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销':
+    'Confirm: delete {n} transcript(s)? Word cuts and pause edits will be undone too',
   // segment.ts — speaker labels shown above each group in the transcript views
   '说话人': 'Speaker',
   '说话人 {n}': 'Speaker {n}',
