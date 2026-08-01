@@ -6,24 +6,17 @@ import { transcribePath as whisperTranscribePath } from '../../transcript/whispe
 import type { TranscriptResult } from '../../transcript/types';
 import { fillerIndices } from '../../transcript/edit';
 import { srtToTranscript } from '../../transcript/srt';
+import { normalizeLanguage, transcriptionSettings } from '../../transcript/provider-settings';
 
-let cachedProvider: 'assemblyai' | 'whisper' | null = null;
-async function resolveProvider(): Promise<'assemblyai' | 'whisper'> {
-  if (cachedProvider) return cachedProvider;
-  try {
-    const r = await fetch('/api/keys');
-    if (r.ok) {
-      const data = await r.json() as { models?: Record<string, string> };
-      cachedProvider = data.models?.TRANSCRIPTION_PROVIDER === 'whisper' ? 'whisper' : 'assemblyai';
-      return cachedProvider;
-    }
-  } catch { /* fall through */ }
-  return 'assemblyai';
-}
-
-function transcribeForProvider(path: string, opts?: { languageCode?: string }): Promise<TranscriptResult> {
-  const fn = cachedProvider === 'whisper' ? whisperTranscribePath : assemblyaiTranscribePath;
-  return fn(path, undefined, { languageCode: opts?.languageCode });
+/** Route to the configured ASR provider in the configured language.
+ * `language` (an explicit tool argument) wins over the configured default, and
+ * an empty result means auto-detect — never a hardcoded language, which silently
+ * produces garbage for anyone whose audio is in something else. */
+async function transcribeForProvider(path: string, language?: string): Promise<TranscriptResult> {
+  const settings = await transcriptionSettings();
+  const fn = settings.provider === 'whisper' ? whisperTranscribePath : assemblyaiTranscribePath;
+  const languageCode = normalizeLanguage(language) || settings.language;
+  return fn(path, undefined, { languageCode: languageCode || undefined });
 }
 import { translateLines } from '../../captions/translate';
 import { createVariant, findVariantByLang, upsertVariant } from '../../transcript/variants';
@@ -55,7 +48,14 @@ export const TRANSCRIPT_TOOL_SCHEMAS: AgentToolSchema[] = [
   {
     name: 'transcribe_track',
     description: 'Transcribe every audio/video clip on a track — word-level timestamps, using the configured provider (AssemblyAI cloud or local Whisper). This is THE tool for transcription; never try to run ffmpeg or Whisper manually in a sandbox. Required before find_transcript / clean_script / delete_text / captions when clips have no transcript yet.',
-    input_schema: { type: 'object', properties: { track: { type: 'string', description: 'Track alias or stable id whose audio to transcribe (default A1).' } } },
+    input_schema: {
+      type: 'object',
+      properties: {
+        track: { type: 'string', description: 'Track alias or stable id whose audio to transcribe (default A1).' },
+        language: { type: 'string', description: "Spoken language as ISO-639-1, e.g. 'id', 'en', 'zh'. Omit to use the configured TRANSCRIPTION_LANGUAGE, or auto-detect when that is unset. Setting the wrong language does not fail — it returns confident nonsense — so pass it when you know it." },
+        replace: { type: 'boolean', description: 'Re-transcribe clips that already have a transcript (default false — they are skipped). Use when switching provider, model, or language.' },
+      },
+    },
   },
   {
     name: 'import_transcript',
@@ -279,8 +279,7 @@ async function manageTranscript(args: Args, ctx: AgentContext, track: TrackId, a
   if (action === 'retry_transcription') {
     if (!it.src) return { error: `item ${it.id} has no media to transcribe` };
     try {
-      await resolveProvider();
-      const r = await transcribeForProvider(it.src, { languageCode: 'zh' });
+      const r = await transcribeForProvider(it.src, typeof args.language === 'string' ? args.language : undefined);
       ctx.commands.setItemTranscript(it.id, r.words);
       return { ok: true, action, itemId: it.id, words: r.words.length, text: r.text.slice(0, 200), retried: true };
     } catch (e) {
@@ -442,7 +441,7 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
   const alias = trackAlias(state, track);
   switch (name) {
     case 'transcribe_track': {
-      await resolveProvider();
+      const language = typeof args.language === 'string' ? args.language : undefined;
       const clips = ctx.getState().items
         .filter((it) => (it.kind === 'audio' || it.kind === 'video') && it.track === track && it.src)
         .sort((a, b) => a.startFrame - b.startFrame);
@@ -450,11 +449,11 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
       const results: { itemId: string; words: number; text: string; skipped?: boolean }[] = [];
       try {
         for (const it of clips) {
-          if (it.transcript?.length) {
+          if (it.transcript?.length && args.replace !== true) {
             results.push({ itemId: it.id, words: it.transcript.length, text: '', skipped: true });
             continue;
           }
-          const r = await transcribeForProvider(it.src!, { languageCode: 'zh' });
+          const r = await transcribeForProvider(it.src!, language);
           ctx.commands.setItemTranscript(it.id, r.words);
           results.push({ itemId: it.id, words: r.words.length, text: r.text.slice(0, 200) });
         }

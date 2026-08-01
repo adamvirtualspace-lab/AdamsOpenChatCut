@@ -10,6 +10,7 @@ import type { MediaAsset } from '../editor/types';
 import type { TranscriptWord } from './types';
 import { transcribePath as assemblyaiTranscribePath } from './assemblyai';
 import { transcribePath as whisperTranscribePath } from './whisper';
+import { transcriptionSettings } from './provider-settings';
 import { isTerminal, type JobReportBase } from '../agent/progress/job-model';
 
 export type TranscribeJobStatus = 'running' | 'done' | 'failed';
@@ -24,22 +25,6 @@ export interface TranscribeJob {
 const jobs = new Map<string, TranscribeJob>();
 
 const POLL_MS = 1000;
-const DEFAULT_LANG = 'zh';
-
-let cachedProvider: 'assemblyai' | 'whisper' | null = null;
-
-async function resolveProvider(): Promise<'assemblyai' | 'whisper'> {
-  if (cachedProvider) return cachedProvider;
-  try {
-    const r = await fetch('/api/keys');
-    if (r.ok) {
-      const data = await r.json() as { models?: Record<string, string> };
-      cachedProvider = data.models?.TRANSCRIPTION_PROVIDER === 'whisper' ? 'whisper' : 'assemblyai';
-      return cachedProvider;
-    }
-  } catch { /* fall through */ }
-  return 'assemblyai';
-}
 
 interface EnqueueOptions {
   languageCode?: string;
@@ -80,10 +65,11 @@ export function enqueueTranscription(
     } catch {
       asrPath = undefined;
     }
-    const provider = await resolveProvider();
-    const fn = provider === 'whisper' ? whisperTranscribePath : assemblyaiTranscribePath;
+    const settings = await transcriptionSettings();
+    const fn = settings.provider === 'whisper' ? whisperTranscribePath : assemblyaiTranscribePath;
     return fn(asset.src, undefined, {
-      languageCode: opts.languageCode ?? DEFAULT_LANG,
+      // Caller wins, then the configured language, then engine auto-detect.
+      languageCode: opts.languageCode ?? settings.language ?? undefined,
       asrPath: asrPath || undefined,
     });
   })()
@@ -118,10 +104,8 @@ export async function waitForTranscribeJobs(assetIds: string[], timeoutMs: numbe
   }
 }
 
-/** Invalidate the cached provider so the next job re-fetches from the server. */
-export function invalidateProviderCache(): void {
-  cachedProvider = null;
-}
+/** Invalidate cached transcription routing so the next job re-reads the keystore. */
+export { invalidateTranscriptionSettings as invalidateProviderCache } from './provider-settings';
 
 /** Test seam: reset the in-memory table (used by the check; not part of the app flow). */
 export function __resetTranscribeJobs(): void {

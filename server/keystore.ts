@@ -81,7 +81,9 @@ export const KEY_NAMES = [
   "FREESOUND_API_KEY",
   "ASSEMBLYAI_API_KEY",
   "TRANSCRIPTION_PROVIDER",
+  "TRANSCRIPTION_LANGUAGE",
   "WHISPER_MODEL",
+  "WHISPER_DENOISE",
   "E2B_API_KEY",
   "E2B_TEMPLATE",
   "FIRECRAWL_API_KEY",
@@ -142,7 +144,9 @@ export const NON_SECRET_NAMES: ReadonlySet<string> = new Set([
   "R2_PRESIGN", // Browser pre-signed direct transmission ('' default = enabled, '0' = server-side write-through only)
   "MEDIA_DIR", // Asset saving directory (local path, '' = default public/media/uploads) - configuration is not credentials
   "TRANSCRIPTION_PROVIDER",
+  "TRANSCRIPTION_LANGUAGE",
   "WHISPER_MODEL",
+  "WHISPER_DENOISE",
   ...LLM_PROVIDER_PRESETS.flatMap((preset) => {
     const names = llmProviderConfigNames(preset.id);
     return [names.baseUrl, names.model];

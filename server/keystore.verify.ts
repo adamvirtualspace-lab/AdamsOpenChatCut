@@ -84,6 +84,8 @@ const MODEL_ROUTING_NAMES = [
   'R2_PRESIGN', // Browser pre-signed direct transmission (''=enabled/'0'=server-side write-through only)
   'MEDIA_DIR',  // Asset saving directory (''=default public/media/uploads)
   'TRANSCRIPTION_PROVIDER', // ASR route: ''/assemblyai = cloud, 'whisper' = local
+  'TRANSCRIPTION_LANGUAGE', // Spoken language ISO-639-1; '' = auto-detect
+  'WHISPER_DENOISE',        // '1' = band-limit + denoise before ASR
   'WHISPER_MODEL',          // Local Whisper size: tiny|base|small|medium|large
 ] as const;
 for (const name of MODEL_ROUTING_NAMES) {
