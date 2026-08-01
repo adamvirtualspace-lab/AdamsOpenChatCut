@@ -91,6 +91,7 @@ const MODEL_ROUTING_NAMES = [
   'WHISPER_CPP_BIN',
   'WHISPER_CPP_MODEL',
   'WHISPER_CPP_VAD_MODEL',
+  'WHISPER_CPP_MAX_LEN',  // characters per subtitle segment; 0 = no cap
   'WHISPER_MODEL',          // Local Whisper size: tiny|base|small|medium|large
 ] as const;
 for (const name of MODEL_ROUTING_NAMES) {

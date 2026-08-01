@@ -269,6 +269,9 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
                 defaultLabel: '留空 = ~/whisper.cpp',
                 placeholder: 'C:\\Users\\me\\whisper.cpp',
                 note: '可执行文件与 models/ 所在目录。' },
+              { name: 'WHISPER_CPP_MAX_LEN', label: '每段最多字符', kind: 'text',
+                defaultLabel: '默认 18', placeholder: '18',
+                note: 'whisper.cpp --max-len：在转写时就把长句切成短段（每段自带真实时间轴），字幕更好读。填 0 = 不切分。' },
               { name: 'WHISPER_DENOISE', label: '转写前降噪', kind: 'select', defaultLabel: '关闭',
                 note: '先做人声频段限制 + 频谱降噪再转写。游戏 / 音乐等嘈杂素材上能多认出不少词；干净的录音棚素材可能反而变差。',
                 options: [

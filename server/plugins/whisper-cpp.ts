@@ -176,6 +176,18 @@ export async function downloadModel(model: DownloadableModel, targetDir: string)
   }
 }
 
+/** Characters per subtitle segment. 0 disables the cap (whisper's own
+ * sentence-length segments). Default follows the value that works well for
+ * on-screen subtitle lines. */
+function maxLenChars(): number {
+  const raw = getKey('WHISPER_CPP_MAX_LEN');
+  if (raw === '') return DEFAULT_MAX_LEN;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_MAX_LEN;
+}
+
+const DEFAULT_MAX_LEN = 18;
+
 export interface CppRunOptions {
   language: string;
   threads?: number;
@@ -278,6 +290,8 @@ async function transcribeWindow(
     '--entropy-thold', '2.4', '--logprob-thold', '-1.0',
     // A deterministic re-run reproduces the same stutter, so each retry warms up.
     '-tp', String(temperature)];
+  const repairMaxLen = maxLenChars();
+  if (repairMaxLen > 0) args.push('--max-len', String(repairMaxLen), '--split-on-word');
   if (status.vadPresent) args.push('--vad', '--vad-model', status.vadModel);
   await new Promise<void>((resolve, reject) => {
     const child = spawn(status.bin, args, { cwd: status.root, stdio: 'ignore', env: childEnv(status) });
@@ -353,6 +367,13 @@ export async function transcribeWithCpp(
       '--entropy-thold', '2.4',
       '--logprob-thold', '-1.0',
     ];
+    // --max-len caps CHARACTERS per segment, so whisper.cpp splits at the source
+    // and every short line carries its own model timing. Doing this in the UI
+    // instead would only reflow display text over one long interpolated cue.
+    const maxLen = maxLenChars();
+    // --split-on-word: without it the cap lands on TOKEN boundaries and cuts
+    // words in half ("kembali" -> "kemb" / "ali").
+    if (maxLen > 0) args.push('--max-len', String(maxLen), '--split-on-word');
     if (status.vadPresent) args.push('--vad', '--vad-model', status.vadModel);
 
     await new Promise<void>((resolve, reject) => {
