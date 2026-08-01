@@ -59,6 +59,13 @@ async function loadModel(): Promise<any> {
     modelError = null;
     const id = resolveModelId();
     try {
+      // Release the previous pipeline before loading another. Without this a
+      // tiny -> base -> small walk keeps every ONNX session alive, and the dev
+      // server grows by GBs — which is how it ended up starving whisper-cli.
+      if (whisperModel && loadedModelId !== id) {
+        await whisperModel.dispose?.().catch?.(() => undefined);
+        whisperModel = null;
+      }
       const mod = await import('@huggingface/transformers');
       whisperModel = await mod.pipeline('automatic-speech-recognition', id);
       loadedModelId = id;
@@ -272,20 +279,28 @@ export function whisperPlugin(): Plugin {
             return;
           }
 
+          // One run at a time. Two whisper-cli processes contend for the same GPU
+          // and host memory, and the second typically fails to init the backend
+          // rather than queueing.
+          if (progress.active) {
+            sendJson(res, 409, {
+              error: 'a transcription is already running',
+              file: progress.file,
+              percent: progressReport().percent,
+            });
+            return;
+          }
+
           progress = {
             active: true, file: basename(diskPath), totalSec: 0, doneSec: 0,
             startedAt: Date.now(), phase: 'loading-model',
           };
-          const pipe = await loadModel();
-          instrumentChunkProgress(pipe);
-          server.config.logger.info(
-            `[whisper] transcribing ${basename(diskPath)} with ${loadedModelId}`
-            + ` (lang: ${language || 'auto'}, denoise: ${denoiseEnabled() ? 'on' : 'off'})`,
-          );
 
-          // whisper.cpp when it is installed and not explicitly disabled: it is
-          // GPU-capable, runs large-v3, and brings real VAD. Falls through to the
-          // bundled ONNX path otherwise so a fresh clone still transcribes.
+          // Engine choice comes FIRST. Loading the ONNX model before this ran it
+          // for every whisper.cpp transcription too, holding hundreds of MB (GBs
+          // across model switches) in this process for nothing — enough to starve
+          // whisper-cli of host memory, which then cannot create a CUDA context
+          // ("no GPU found") and aborts on a failed allocation.
           const engine = getKey('WHISPER_ENGINE');
           const cpp = cppStatus();
           if (engine !== 'onnx' && cpp.ready) {
@@ -308,6 +323,13 @@ export function whisperPlugin(): Plugin {
             sendJson(res, 200, { ...result, engine: 'whisper.cpp' });
             return;
           }
+
+          const pipe = await loadModel();
+          instrumentChunkProgress(pipe);
+          server.config.logger.info(
+            `[whisper] transcribing ${basename(diskPath)} with ${loadedModelId}`
+            + ` (lang: ${language || 'auto'}, denoise: ${denoiseEnabled() ? 'on' : 'off'})`,
+          );
 
           progress = { ...progress, phase: 'decoding' };
           const denoise = denoiseEnabled();

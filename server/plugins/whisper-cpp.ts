@@ -185,6 +185,18 @@ export interface CppRunOptions {
   onNote?: (note: string) => void;
 }
 
+/** whisper-cli loads its ggml/CUDA backends as DLLs. Spawned from the dev server
+ * it inherits a PATH that may contain a DIFFERENT CUDA runtime, and loading a
+ * mismatched cudart/cublas ahead of the ones shipped beside the binary crashes
+ * ggml (exit 0xC0000409) — while the same command run from a shell in that
+ * directory succeeds. Put the install root first so its own DLLs always win. */
+function childEnv(status: CppStatus): NodeJS.ProcessEnv {
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const key = process.platform === 'win32' ? 'Path' : 'LD_LIBRARY_PATH';
+  const current = process.env[key] ?? process.env.PATH ?? '';
+  return { ...process.env, [key]: `${status.root}${sep}${current}` };
+}
+
 /** Bounded so a pathological file cannot turn into hundreds of extra passes.
  * Windows are 1-3s and whisper.cpp runs ~23x realtime, so this is cheap. */
 const MAX_REPAIR_WINDOWS = 48;
@@ -268,7 +280,7 @@ async function transcribeWindow(
     '-tp', String(temperature)];
   if (status.vadPresent) args.push('--vad', '--vad-model', status.vadModel);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(status.bin, args, { cwd: status.root, stdio: 'ignore' });
+    const child = spawn(status.bin, args, { cwd: status.root, stdio: 'ignore', env: childEnv(status) });
     child.on('error', reject);
     child.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`whisper-cli exit ${code}`))));
   });
@@ -344,7 +356,7 @@ export async function transcribeWithCpp(
     if (status.vadPresent) args.push('--vad', '--vad-model', status.vadModel);
 
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(status.bin, args, { cwd: status.root, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(status.bin, args, { cwd: status.root, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv(status) });
       let stderr = '';
       const scan = (text: string): void => {
         if (!opts.onProgress) return;
