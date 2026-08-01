@@ -2,6 +2,7 @@ import type { Plugin } from 'vite';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { spawn } from 'node:child_process';
 import { getKey } from '../keystore.ts';
+import { MODELS, VAD_MODEL, cppStatus, downloadModel, downloadProgress, transcribeWithCpp } from './whisper-cpp.ts';
 import { resolveUploadFile, uploadDir } from '../media-dir.ts';
 import { existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
@@ -79,6 +80,21 @@ const DENOISE_FILTER = 'highpass=f=80,lowpass=f=8000,afftdn=nr=12:nf=-25:tn=1';
 
 function denoiseEnabled(): boolean {
   return getKey('WHISPER_DENOISE') === '1';
+}
+
+/** Media duration in seconds, for the progress denominator. */
+function probeDuration(inputPath: string): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', inputPath,
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout?.on('data', (c: Buffer) => { out += String(c); });
+    // Unknown duration only costs a percentage readout, never the transcription.
+    child.on('error', () => resolve(0));
+    child.on('close', () => resolve(Number.parseFloat(out.trim()) || 0));
+  });
 }
 
 function decodeAudio(inputPath: string, filter: string | null): Promise<Float32Array> {
@@ -182,6 +198,46 @@ export function whisperPlugin(): Plugin {
         sendJson(res, 200, progressReport());
       });
 
+      // ── whisper.cpp setup, driven from Settings ──
+      server.middlewares.use('/api/whisper-cpp/status', (_req, res) => {
+        const status = cppStatus();
+        sendJson(res, 200, {
+          ...status,
+          engine: getKey('WHISPER_ENGINE') || 'auto',
+          // Which engine an actual transcription would pick right now.
+          effective: getKey('WHISPER_ENGINE') !== 'onnx' && status.ready ? 'whisper.cpp' : 'transformers.js',
+          models: MODELS.map((m) => ({
+            ...m, installed: existsSync(join(status.root, 'models', m.file)),
+          })),
+          vad: { ...VAD_MODEL, installed: existsSync(join(status.root, 'models', VAD_MODEL.file)) },
+          download: downloadProgress(),
+        });
+      });
+
+      server.middlewares.use('/api/whisper-cpp/download', async (req, res) => {
+        if (req.method !== 'POST') {
+          sendJson(res, 405, { error: 'method not allowed — use POST' });
+          return;
+        }
+        try {
+          const body = (await readJson(req)) as { model?: string };
+          const id = String(body.model ?? '').trim();
+          const model = id === VAD_MODEL.id ? VAD_MODEL : MODELS.find((m) => m.id === id);
+          if (!model) {
+            sendJson(res, 400, { error: `unknown model ${id}` });
+            return;
+          }
+          const dir = join(cppStatus().root, 'models');
+          // Respond immediately; the client polls /status for progress.
+          void downloadModel(model, dir).catch((err: unknown) => {
+            server.config.logger.error(`[whisper.cpp] download failed: ${String(err)}`);
+          });
+          sendJson(res, 202, { started: true, file: model.file, targetDir: dir });
+        } catch (err) {
+          sendJson(res, 500, { error: err instanceof Error ? err.message : String(err) });
+        }
+      });
+
       server.middlewares.use('/api/transcribe-local/status', (_req, res) => {
         sendJson(res, 200, {
           ready: whisperModel !== null,
@@ -226,6 +282,31 @@ export function whisperPlugin(): Plugin {
             `[whisper] transcribing ${basename(diskPath)} with ${loadedModelId}`
             + ` (lang: ${language || 'auto'}, denoise: ${denoiseEnabled() ? 'on' : 'off'})`,
           );
+
+          // whisper.cpp when it is installed and not explicitly disabled: it is
+          // GPU-capable, runs large-v3, and brings real VAD. Falls through to the
+          // bundled ONNX path otherwise so a fresh clone still transcribes.
+          const engine = getKey('WHISPER_ENGINE');
+          const cpp = cppStatus();
+          if (engine !== 'onnx' && cpp.ready) {
+            progress = { ...progress, phase: 'transcribing', totalSec: 0, startedAt: Date.now() };
+            const durationSec = await probeDuration(diskPath);
+            progress = { ...progress, totalSec: durationSec };
+            server.config.logger.info(
+              `[whisper] transcribing ${basename(diskPath)} with whisper.cpp`
+              + ` (${basename(cpp.model)}, lang: ${language || 'auto'}, vad: ${cpp.vadPresent ? 'on' : 'off'}`
+              + `, gpu: ${cpp.gpu ? 'yes' : 'no'})`,
+            );
+            const result = await transcribeWithCpp(diskPath, {
+              language,
+              onProgress: (doneSec) => {
+                progress = { ...progress, doneSec: Math.min(progress.totalSec || doneSec, doneSec) };
+              },
+            });
+            progress = { ...progress, active: false, doneSec: progress.totalSec, phase: 'done' };
+            sendJson(res, 200, { ...result, engine: 'whisper.cpp' });
+            return;
+          }
 
           progress = { ...progress, phase: 'decoding' };
           const denoise = denoiseEnabled();

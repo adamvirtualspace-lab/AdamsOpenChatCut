@@ -259,6 +259,16 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
               { name: 'TRANSCRIPTION_LANGUAGE', label: '语言', kind: 'text', defaultLabel: '留空 = 自动识别',
                 placeholder: 'id / en / zh …',
                 note: '口语语言（ISO-639-1）。填错不会报错，只会输出看似流畅的胡话。' },
+              { name: 'WHISPER_ENGINE', label: '引擎', kind: 'select', defaultLabel: '自动',
+                note: '自动：装了 whisper.cpp 就用它（GPU · large-v3 · VAD，快很多也准很多），否则用内置 transformers.js（免安装）。在下方「本地引擎」里安装模型。',
+                options: [
+                  { value: '', label: '自动（推荐）' },
+                  { value: 'onnx', label: '始终用内置 transformers.js' },
+                ] },
+              { name: 'WHISPER_CPP_DIR', label: 'whisper.cpp 目录', kind: 'text',
+                defaultLabel: '留空 = ~/whisper.cpp',
+                placeholder: 'C:\\Users\\me\\whisper.cpp',
+                note: '可执行文件与 models/ 所在目录。' },
               { name: 'WHISPER_DENOISE', label: '转写前降噪', kind: 'select', defaultLabel: '关闭',
                 note: '先做人声频段限制 + 频谱降噪再转写。游戏 / 音乐等嘈杂素材上能多认出不少词；干净的录音棚素材可能反而变差。',
                 options: [

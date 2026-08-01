@@ -84,6 +84,11 @@ export const KEY_NAMES = [
   "TRANSCRIPTION_LANGUAGE",
   "WHISPER_MODEL",
   "WHISPER_DENOISE",
+  "WHISPER_ENGINE",
+  "WHISPER_CPP_DIR",
+  "WHISPER_CPP_BIN",
+  "WHISPER_CPP_MODEL",
+  "WHISPER_CPP_VAD_MODEL",
   "E2B_API_KEY",
   "E2B_TEMPLATE",
   "FIRECRAWL_API_KEY",
@@ -147,6 +152,11 @@ export const NON_SECRET_NAMES: ReadonlySet<string> = new Set([
   "TRANSCRIPTION_LANGUAGE",
   "WHISPER_MODEL",
   "WHISPER_DENOISE",
+  "WHISPER_ENGINE",
+  "WHISPER_CPP_DIR",
+  "WHISPER_CPP_BIN",
+  "WHISPER_CPP_MODEL",
+  "WHISPER_CPP_VAD_MODEL",
   ...LLM_PROVIDER_PRESETS.flatMap((preset) => {
     const names = llmProviderConfigNames(preset.id);
     return [names.baseUrl, names.model];

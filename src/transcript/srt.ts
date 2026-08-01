@@ -5,7 +5,9 @@
 // approximated by character count. That keeps word order and cue boundaries exact
 // (which is what caption sync needs) while giving downstream word-level tools —
 // find_transcript, clean_script, delete_text — something to bite on.
-import type { TranscriptResult, TranscriptWord } from './types';
+// Explicit extension: this module is imported by the server plugin too, whose
+// tsconfig uses node16 resolution and requires it.
+import type { TranscriptResult, TranscriptWord } from './types.ts';
 
 export interface SrtCue {
   /** 1-based cue number as written in the file, or the running index when absent. */
