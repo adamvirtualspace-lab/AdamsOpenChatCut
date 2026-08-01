@@ -4,6 +4,7 @@ import { GENERATE_WORKFLOW } from './tools/generate-tools';
 import { timelineTrackIds, trackAlias, trackKind, type DesignStyle } from '../editor/types';
 import { type CreativeSkill } from './skills/skills-catalog';
 import type { AgentContext } from './context';
+import { getLocale } from '../i18n/locale';
 
 // <editor_state>: Timeline snapshot of each message, spelled into system,
 // The agent will see the timeline when it starts, there is no need to adjust read_timeline first. Keep it compact: no props/transition details,
@@ -22,6 +23,18 @@ const EDITOR_STATE_MAX_ITEMS = 60;
  */
 export function assembleSystemPrompt(stable: readonly string[], volatilePart: string): string {
   return stable.join('') + volatilePart;
+}
+
+/** The reply language, stated explicitly.
+ *
+ * The prompt itself is deliberately English-only and outside i18n, but "reply in
+ * the user's language" is not a usable instruction for a model whose default is
+ * Chinese — it answered in Chinese to English questions. The UI locale is the
+ * one signal we actually have about what the user reads, so name the language. */
+export function replyLanguagePrompt(): string {
+  return getLocale() === 'en'
+    ? '\n# Language\nAlways reply in English, including edit summaries and proposal descriptions, regardless of the language of tool output or the media being edited.\n'
+    : '\n# Language\n始终用简体中文回复，包括编辑摘要与提案说明。\n';
 }
 
 export function editorStatePrompt(ctx: AgentContext): string {

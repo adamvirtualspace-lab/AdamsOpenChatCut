@@ -8,7 +8,7 @@ import {
 } from 'ai';
 import type { AgentContext } from './context';
 import { TOOL_SCHEMAS, executeTool } from './tools';
-import { SYSTEM_PROMPT, assembleSystemPrompt, creativeModePrompt, designStylePrompt, editorStatePrompt } from './systemPrompt';
+import { SYSTEM_PROMPT, assembleSystemPrompt, creativeModePrompt, designStylePrompt, editorStatePrompt, replyLanguagePrompt } from './systemPrompt';
 import { capabilitiesPrompt } from './capabilities';
 import { findSkill } from './skills/skills-catalog';
 import { PLUGIN_SKILLS_INDEX } from './skills/plugin-skills';
@@ -169,6 +169,9 @@ export async function runAgent(
   // editorStatePrompt is a real-time timeline snapshot and must be placed in the last paragraph; new paragraphs are always added in front of it.
   const system = assembleSystemPrompt([
     SYSTEM_PROMPT,
+    // Right after the constant preamble: stable per user (locale rarely changes),
+    // so it does not disturb the prompt-cache prefix.
+    replyLanguagePrompt(),
     capabilitiesPrompt(),
     PLUGIN_SKILLS_INDEX,
     agentSettingsPrompt(settings),

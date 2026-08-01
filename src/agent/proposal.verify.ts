@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { projectReduce } from '../editor/reduce';
 import type { ProjectDoc, Timeline } from '../editor/types';
 import { buildOperation, compactOperations } from './proposal';
+// Labels are localized now, so assert through t() rather than pinning one language.
+import { t } from '../i18n/locale';
 
 const denoise = (src: string | null) => buildOperation(
   'isolate_voice',
@@ -18,8 +20,8 @@ const compacted = compactOperations([
 assert.equal(compacted.length, 1);
 assert.equal(compacted[0].callCount, 4);
 assert.equal(compacted[0].actions.length, 4);
-assert.equal(compacted[0].action, '人声隔离');
-assert.equal(compacted[0].impact, '4 处改动');
+assert.equal(compacted[0].action, t('人声隔离'));
+assert.equal(compacted[0].impact, t('{n} 处改动', { n: 4 }));
 
 const distinctArguments = compactOperations([
   buildOperation('edit_captions', { itemId: 'clip-1', text: 'First' }, [{ type: 'setItemDenoise', id: 'clip-1', denoisedSrc: '/first.m4a', strength: 10 }]),
