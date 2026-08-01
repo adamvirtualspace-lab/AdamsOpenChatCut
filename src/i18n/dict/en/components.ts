@@ -86,6 +86,8 @@ export default {
   '更新播放头处的关键帧': 'Update the keyframe at the playhead',
   '在播放头打关键帧': 'Add a keyframe at the playhead',
   '删除播放头处的关键帧': 'Delete the keyframe at the playhead',
+  '把播放头移进这个片段才能打关键帧': 'Move the playhead into this clip to add a keyframe',
+  '把播放头移进这个片段才能改这里的关键帧': 'Move the playhead into this clip to edit its keyframes',
   '缓动（此关键帧到下一帧的曲线）': 'Easing (curve from this keyframe to the next)',
   '线性': 'Linear',
   '缓入': 'Ease In',
