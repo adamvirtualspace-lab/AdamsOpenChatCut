@@ -33,10 +33,25 @@ interface ZoomViewState {
   trackScale: number;
 }
 
+/**
+ * Zoom limits for a fit pass. MIN_TIME_ZOOM is tuned so short (3–8 min) timelines
+ * stay readable, but it also caps how far out the view can go — roughly 24 minutes
+ * of track at a typical viewport. A longer timeline therefore clamps to the floor
+ * and everything past it stays invisible, with "fit to view" appearing to do
+ * nothing. Fitting relaxes the minimum to whatever the content actually needs.
+ */
+function fitLimits(element: HTMLDivElement, totalFrames: number): typeof TIME_LIMITS {
+  const usable = element.clientWidth - HEADER_W - TIMELINE_FIT_PADDING;
+  if (usable <= 0 || totalFrames <= 0) return TIME_LIMITS;
+  const required = usable / (totalFrames * PX_PER_FRAME);
+  return { min: Math.min(TIME_LIMITS.min, required), max: TIME_LIMITS.max };
+}
+
 function fittedZoom(element: HTMLDivElement, totalFrames: number, fps: number): number {
+  const limits = fitLimits(element, totalFrames);
   return fitTimelineZoom(
-    element.clientWidth, HEADER_W, TIMELINE_FIT_PADDING, totalFrames, PX_PER_FRAME, TIME_LIMITS,
-  ) ?? defaultTimelineZoom(fps, PX_PER_FRAME, RULER_LABEL_MIN_PX, TIME_LIMITS);
+    element.clientWidth, HEADER_W, TIMELINE_FIT_PADDING, totalFrames, PX_PER_FRAME, limits,
+  ) ?? defaultTimelineZoom(fps, PX_PER_FRAME, RULER_LABEL_MIN_PX, limits);
 }
 
 function useTimelineWheelZoom(

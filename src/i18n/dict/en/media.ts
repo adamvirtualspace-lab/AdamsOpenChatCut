@@ -34,6 +34,8 @@ export default {
   '已从文件夹按文件名重链 {n} 个素材': 'Relinked {n} assets from the folder by filename',
   '文件夹中没有与丢失素材同名的文件': 'No files in the folder match the missing assets by name',
   '没有待重链的素材': 'Nothing left to relink',
+  '正在重新链接…': 'Relinking…',
+  '已重新链接「{name}」': 'Relinked “{name}”',
   // folder / selection / card
   '返回上级文件夹': 'Back to parent folder',
   '重命名': 'Rename',

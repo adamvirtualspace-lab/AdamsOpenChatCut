@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { ffmpegBin, ffprobeBin } from '../media-binaries.ts';
 import {
   isVariableFrameRate,
+  parseFfmpegProgressSeconds,
   parseFrameRate,
   playableDurationSeconds,
   resolveTargetFps,
@@ -24,6 +25,16 @@ assert.equal(resolveTargetFps(undefined, 59.94, 60), 60);
 assert.equal(resolveTargetFps(undefined, undefined, undefined), 30);
 assert.equal(playableDurationSeconds({ duration: 3.934, frameCount: 116, avgFrameRate: 30 }), 116 / 30);
 assert.equal(playableDurationSeconds({ duration: 3.934 }), 3.934);
+
+// -progress pipe:1 parsing: last value in a chunk wins, N/A is skipped.
+assert.equal(parseFfmpegProgressSeconds('out_time_us=5120000\nprogress=continue'), 5.12);
+assert.equal(
+  parseFfmpegProgressSeconds('frame=1\nout_time_us=1000000\nprogress=continue\nout_time_us=2500000\nprogress=continue'),
+  2.5,
+);
+assert.equal(parseFfmpegProgressSeconds('out_time_us=N/A\nprogress=continue'), undefined);
+assert.equal(parseFfmpegProgressSeconds('frame=12\nfps=45.0'), undefined);
+assert.equal(parseFfmpegProgressSeconds('out_time_us=0\nprogress=end'), 0);
 
 for (const [name, binary] of [['ffmpeg', ffmpegBin()], ['ffprobe', ffprobeBin()]]) {
   const result = spawnSync(binary, ['-version'], { encoding: 'utf8' });

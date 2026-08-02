@@ -1,4 +1,7 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  adoptServerRun, beginTranscription, endTranscription, reportTranscription, useTranscriptionActivity,
+} from './transcriptionActivity';
 import { TranscriptionError, transcribePath as assemblyaiTranscribePath, type TranscribeOptions } from './assemblyai';
 import { transcribePath as whisperTranscribePath, type WhisperProgress } from './whisper';
 import { transcriptionSettings } from './provider-settings';
@@ -65,7 +68,16 @@ export function useTranscript() {
   const [result, setResult] = useState<TranscriptResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeItemId, setActiveItemId] = useState<string | null>(null);
-  const [progressNote, setProgressNote] = useState<string | null>(null);
+  const [localNote, setProgressNote] = useState<string | null>(null);
+  // Survives this panel unmounting on a tab switch, and recovers a run started
+  // before a remount/reload so the Transcribe button is never re-armed over one.
+  const activity = useTranscriptionActivity();
+  useEffect(() => {
+    if (status === 'idle') void adoptServerRun();
+  }, [status]);
+  // A live run wins over the local status, which resets to 'idle' on remount.
+  const busyElsewhere = activity.active && status === 'idle';
+  const progressNote = localNote ?? (busyElsewhere ? activity.note : null);
 
   const reset = useCallback(() => {
     setStatus('idle');
@@ -83,17 +95,26 @@ export function useTranscript() {
     setError(null);
     setResult(null);
     setActiveItemId(opts?.itemId ?? null);
-    setProgressNote(await startLabel(opts?.label));
+    const opening = await startLabel(opts?.label);
+    setProgressNote(opening);
+    beginTranscription(opening);
     try {
       const { result: r } = await transcribeVia(
         path,
         () => {
           setStatus('processing');
-          setProgressNote(opts?.label ? t('转写 {label}…', { label: opts.label }) : t('转写中…'));
+          const note = opts?.label ? t('转写 {label}…', { label: opts.label }) : t('转写中…');
+          setProgressNote(note);
+          reportTranscription(note);
         },
         {
           languageCode: opts?.languageCode,
-          onProgress: (p) => { setStatus('processing'); setProgressNote(progressLabel(p)); },
+          onProgress: (p) => {
+            setStatus('processing');
+            const note = progressLabel(p);
+            setProgressNote(note);
+            reportTranscription(note);
+          },
         },
       );
       setResult(r);
@@ -105,6 +126,8 @@ export function useTranscript() {
       setStatus('error');
       setProgressNote(null);
       throw e;
+    } finally {
+      endTranscription();
     }
   }, []);
 
@@ -122,11 +145,15 @@ export function useTranscript() {
     let last: TranscriptResult | null = null;
     const failures: string[] = [];
     let ok = 0;
+    // Track the whole batch so switching tabs mid-run cannot re-arm the button.
+    const note = (value: string) => { setProgressNote(value); reportTranscription(value); };
+    beginTranscription(null);
+    try {
     for (let i = 0; i < jobs.length; i++) {
       const job = jobs[i]!;
       setActiveItemId(job.itemId);
       setStatus('uploading');
-      setProgressNote(t('({i}/{total}) {phase}', {
+      note(t('({i}/{total}) {phase}', {
         i: i + 1, total: jobs.length, phase: await startLabel(job.label),
       }));
       try {
@@ -134,13 +161,13 @@ export function useTranscript() {
           job.path,
           () => {
             setStatus('processing');
-            setProgressNote(t('({i}/{total}) 转写 {label}…', { i: i + 1, total: jobs.length, label: job.label }));
+            note(t('({i}/{total}) 转写 {label}…', { i: i + 1, total: jobs.length, label: job.label }));
           },
           {
             ...opts,
             onProgress: (p) => {
               setStatus('processing');
-              setProgressNote(t('({i}/{total}) {phase}', {
+              note(t('({i}/{total}) {phase}', {
                 i: i + 1, total: jobs.length, phase: progressLabel(p),
               }));
             },
@@ -171,7 +198,22 @@ export function useTranscript() {
       setError(null);
     }
     return last;
+    } finally {
+      endTranscription();
+    }
   }, []);
 
-  return { status, result, error, activeItemId, progressNote, run, runMany, reset };
+  return {
+    status,
+    result,
+    error,
+    activeItemId,
+    progressNote,
+    // True while this hook is running *or* a run started elsewhere is still in
+    // flight, so the panel cannot re-arm Transcribe into a 409.
+    busy: status === 'uploading' || status === 'processing' || busyElsewhere,
+    run,
+    runMany,
+    reset,
+  };
 }

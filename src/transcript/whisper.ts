@@ -129,11 +129,21 @@ export async function transcribePath(
     if (poll) clearInterval(poll);
   }
   if (!r.ok) {
-    const d = await r.json().catch(() => ({}));
+    const d = await r.json().catch(() => ({})) as {
+      error?: string; message?: string; file?: string; percent?: number;
+    };
+    // The server names every failure in `error`; only 502/503/500 add `message`.
+    // Reading `message` alone turned the useful ones into a bare "HTTP <n>".
+    const detail = d.message || d.error;
     if (r.status === 503 || r.status === 502) {
-      throw new TranscriptionError('service-unavailable', d.message || `whisper unavailable (HTTP ${r.status})`);
+      throw new TranscriptionError('service-unavailable', detail || `whisper unavailable (HTTP ${r.status})`);
     }
-    throw new Error(d.message || `transcription failed: HTTP ${r.status}`);
+    if (r.status === 409) {
+      // Only one run at a time: say what is holding the slot and how far along it is.
+      const busy = d.file ? ` (${d.file}${typeof d.percent === 'number' ? `, ${d.percent}%` : ''})` : '';
+      throw new Error(`${detail || 'a transcription is already running'}${busy}`);
+    }
+    throw new Error(detail || `transcription failed: HTTP ${r.status}`);
   }
   return r.json();
 }

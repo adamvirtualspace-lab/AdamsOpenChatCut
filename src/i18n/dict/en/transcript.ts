@@ -13,6 +13,9 @@ export default {
   '约剩 {eta}': '~{eta} left',
   '词级转写 · 该轨共 {n} 段会逐段处理。转写后可点词删减（删词=剪音频）。':
     'Word-level transcription · all {n} clips on this track are processed one by one. Then click words to cut them (delete a word = cut the audio).',
+  // TranscriptPanel — make captions from the current transcript
+  '生成字幕': 'Make captions',
+  '用当前文字稿生成字幕': 'Make captions from the current transcript',
   // TranscriptPanel — delete the whole transcript for the active track
   '删除文字稿': 'Delete transcript',
   '删除该轨的文字稿（可撤销）': 'Delete this track\'s transcript (undoable)',

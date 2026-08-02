@@ -195,6 +195,13 @@ export interface CppRunOptions {
   onProgress?: (doneSec: number) => void;
   /** Diagnostics worth logging (e.g. how many repeat runs were repaired). */
   onNote?: (note: string) => void;
+  /**
+   * Repeat verification re-transcribes each suspicious window in its own
+   * whisper-cli pass, so it can run for minutes *after* the main decode hits
+   * 100%. Without this the UI sits at 100% looking wedged and users retry into
+   * a 409.
+   */
+  onVerifyRepeats?: (done: number, total: number) => void;
 }
 
 /** whisper-cli loads its ggml/CUDA backends as DLLs. Spawned from the dev server
@@ -412,7 +419,10 @@ export async function transcribeWithCpp(
     let repaired = 0;
     let confirmed = 0;
     let forced = 0;
-    for (const run of runs.slice(0, MAX_REPAIR_WINDOWS)) {
+    const windows = runs.slice(0, MAX_REPAIR_WINDOWS);
+    if (windows.length) opts.onVerifyRepeats?.(0, windows.length);
+    let verified = 0;
+    for (const run of windows) {
       const from = Math.max(0, run.startMs / 1000 - REPAIR_PAD_SEC);
       const to = run.endMs / 1000 + REPAIR_PAD_SEC;
       const fixed = await repairWindow(status, wavPath, dir, from, to, opts.language, run);
@@ -427,6 +437,8 @@ export async function transcribeWithCpp(
       } else {
         confirmed += 1;
       }
+      verified += 1;
+      opts.onVerifyRepeats?.(verified, windows.length);
     }
     if (runs.length) {
       opts.onNote?.(`repeat runs: ${runs.length}, rewritten ${repaired}, collapsed as impossible ${forced}, confirmed real ${confirmed}`);

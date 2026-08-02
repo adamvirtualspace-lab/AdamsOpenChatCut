@@ -147,7 +147,10 @@ interface WhisperProgress {
   /** Audio seconds whose chunk has come back from the model. */
   doneSec: number;
   startedAt: number;
-  phase: 'decoding' | 'loading-model' | 'transcribing' | 'done' | 'error';
+  phase: 'decoding' | 'loading-model' | 'transcribing' | 'verifying-repeats' | 'done' | 'error';
+  /** Repeat-verification windows finished / total, while phase is verifying-repeats. */
+  verifyDone?: number;
+  verifyTotal?: number;
 }
 
 const NO_PROGRESS: WhisperProgress = {
@@ -179,7 +182,7 @@ function instrumentChunkProgress(pipe: any): void {
 }
 
 function progressReport(): Record<string, unknown> {
-  const { active, file, totalSec, doneSec, startedAt, phase } = progress;
+  const { active, file, totalSec, doneSec, startedAt, phase, verifyDone, verifyTotal } = progress;
   const elapsedSec = startedAt ? (Date.now() - startedAt) / 1000 : 0;
   // Rate is audio-seconds per wall-second; only meaningful once work has landed.
   const rate = doneSec > 0 && elapsedSec > 0 ? doneSec / elapsedSec : 0;
@@ -188,6 +191,7 @@ function progressReport(): Record<string, unknown> {
     active,
     file,
     phase,
+    ...(phase === 'verifying-repeats' ? { verifyDone, verifyTotal } : {}),
     totalSec: Math.round(totalSec),
     doneSec: Math.round(doneSec),
     percent: totalSec > 0 ? Math.min(100, Math.round((doneSec / totalSec) * 100)) : 0,
@@ -318,6 +322,9 @@ export function whisperPlugin(): Plugin {
                 progress = { ...progress, doneSec: Math.min(progress.totalSec || doneSec, doneSec) };
               },
               onNote: (note) => server.config.logger.info(`[whisper.cpp] ${note}`),
+              onVerifyRepeats: (done, total) => {
+                progress = { ...progress, phase: 'verifying-repeats', verifyDone: done, verifyTotal: total };
+              },
             });
             progress = { ...progress, active: false, doneSec: progress.totalSec, phase: 'done' };
             sendJson(res, 200, { ...result, engine: 'whisper.cpp' });

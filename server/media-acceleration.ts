@@ -30,7 +30,13 @@ interface PromiseConstructorWithResolvers {
 const promiseConstructor = Promise as unknown as PromiseConstructorWithResolvers;
 
 const DEFAULT_VAAPI_DEVICE = '/dev/dri/renderD128';
-const PROBE_FRAME_SIZE = 64;
+// The probe encodes one raw frame to prove a GPU + driver actually work. It must
+// clear every encoder's *minimum* frame dimension: modern NVENC drivers (e.g.
+// RTX 40/50-series) reject frames below ~145px with "Frame Dimension less than
+// the minimum supported value", which made a 64px probe wrongly report NVENC as
+// unavailable and fall back to slow software libx264. 256px clears NVENC/QSV/AMF
+// minimums while staying a trivially small, one-frame encode.
+const PROBE_FRAME_SIZE = 256;
 const PROBE_FRAME_BYTES = PROBE_FRAME_SIZE * PROBE_FRAME_SIZE * 3 / 2;
 const VAAPI_DEVICE_PATTERN = /^\/dev\/dri\/renderD\d+$/;
 const ENCODER_LABELS: Record<H264Encoder, string> = {

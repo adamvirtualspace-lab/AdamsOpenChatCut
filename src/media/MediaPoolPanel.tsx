@@ -4,6 +4,7 @@ import type { MediaAsset, MediaFolder } from '../editor/types';
 import { usePersistedState } from '../hooks/usePersistedState';
 import { useFocusReturn } from '../hooks/useFocusReturn';
 import { importMedia } from './upload';
+import { beginUpload, reportUpload, endUpload, useUploadProgress } from './uploadProgress';
 import { folderPath } from './mediaPoolFormat';
 import { MediaPoolToolbar, type MediaToolbarMenu } from './MediaPoolToolbar';
 import type { SemanticMatch } from './semantic-search/types';
@@ -48,8 +49,9 @@ export function MediaPoolPanel({
   const inputRef = useRef<HTMLInputElement>(null);
   const relinkInputRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
-  /** 0..1 while uploading; null when idle / unknown */
-  const [uploadRatio, setUploadRatio] = useState<number | null>(null);
+  // Upload progress lives in a module store so it survives this panel
+  // unmounting on a tab switch — the percentage returns when we come back.
+  const upload = useUploadProgress();
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [sort, setSort] = useState<MediaSortKey>('newest');
@@ -78,6 +80,8 @@ export function MediaPoolPanel({
   const [relinkTarget, setRelinkTarget] = useState<string | null>(null);
   const dirInputRef = useRef<HTMLInputElement>(null);
   const [dirBusy, setDirBusy] = useState(false);
+  const [relinkBusy, setRelinkBusy] = useState(false);
+  const [relinkErr, setRelinkErr] = useState<string | null>(null);
   const [relinkMsg, setRelinkMsg] = useState<string | null>(null);
   const [showRelinkAll, setShowRelinkAll] = useState(false);
   const [semanticResults, setSemanticResults] = useState<SemanticMatch[] | null>(null);
@@ -112,8 +116,14 @@ export function MediaPoolPanel({
     setRelinkTarget(null);
     if (relinkInputRef.current) relinkInputRef.current.value = '';
     if (!file || !id || !onRelinkAsset) return;
+    // Drive feedback that is visible *inside* the open RelinkAllDialog — the
+    // panel's own busy/error rows sit behind the modal, so without this a slow
+    // or failed relink looks like the button did nothing.
     setBusy(true);
+    setRelinkBusy(true);
     setError(null);
+    setRelinkErr(null);
+    setRelinkMsg(null);
     try {
       const next = await importMedia(file, fps);
       onRelinkAsset(id, {
@@ -128,10 +138,14 @@ export function MediaPoolPanel({
         sourceModifiedAt: next.sourceModifiedAt,
       });
       clearMissing(id);
+      setRelinkMsg(t('已重新链接「{name}」', { name: next.name }));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setError(message);
+      setRelinkErr(message);
     } finally {
       setBusy(false);
+      setRelinkBusy(false);
     }
   };
 
@@ -175,10 +189,14 @@ export function MediaPoolPanel({
   };
 
   // <input webkitdirectory> is not in React's typed props — set it on the DOM node.
+  // The folder input lives inside RelinkAllDialog, which is unmounted until the
+  // dialog opens, so this must run when `showRelinkAll` flips true (not just on
+  // mount, when dirInputRef.current is still null and the picker would fall back
+  // to selecting a single file instead of a folder).
   useEffect(() => {
     const el = dirInputRef.current;
     if (el) { el.setAttribute('webkitdirectory', ''); el.setAttribute('directory', ''); }
-  }, []);
+  }, [showRelinkAll]);
 
   const missingList = assets.filter((a) => missing.has(a.id));
 
@@ -193,22 +211,22 @@ export function MediaPoolPanel({
     if (!files?.length) return;
     setBusy(true);
     setError(null);
-    setUploadRatio(0);
+    beginUpload();
     try {
       const list = Array.from(files);
       for (let i = 0; i < list.length; i += 1) {
         const file = list[i]!;
         await onImport(file, (ratio) => {
           // Multi-file: map each file's progress into a global 0..1 band.
-          setUploadRatio((i + ratio) / list.length);
+          reportUpload((i + ratio) / list.length);
         });
       }
-      setUploadRatio(1);
+      reportUpload(1);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
       setBusy(false);
-      setUploadRatio(null);
+      endUpload();
       if (inputRef.current) inputRef.current.value = '';
     }
   };
@@ -282,8 +300,8 @@ export function MediaPoolPanel({
         favoritesOnly={favoritesOnly}
         view={view}
         menu={menu}
-        busy={busy}
-        uploadRatio={uploadRatio}
+        busy={busy || upload.active}
+        uploadRatio={upload.active ? upload.ratio : null}
         canAddSolid={!!onAddSolid}
         onQueryChange={setQuery}
         onSemanticResults={onSemanticResults}
@@ -368,8 +386,9 @@ export function MediaPoolPanel({
 
       <RelinkAllDialog
         open={showRelinkAll}
-        busy={dirBusy}
+        busy={dirBusy || relinkBusy}
         message={relinkMsg}
+        error={relinkErr}
         missingAssets={missingList}
         inputRef={dirInputRef}
         onClose={() => setShowRelinkAll(false)}

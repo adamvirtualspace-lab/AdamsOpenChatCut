@@ -102,6 +102,7 @@ interface RelinkAllDialogProps {
   open: boolean;
   busy: boolean;
   message: string | null;
+  error?: string | null;
   missingAssets: MediaAsset[];
   inputRef: RefObject<HTMLInputElement | null>;
   onClose: () => void;
@@ -122,8 +123,10 @@ export function RelinkAllDialog(props: RelinkAllDialogProps) {
           {props.busy ? t('正在按文件名匹配…') : t('选择文件夹批量重链（按文件名匹配）')}
         </button>
         {props.message && <div style={{ fontSize: 12, color: `color-mix(in srgb, ${theme.success} 65%, ${theme.textStrong})`, margin: '0 0 10px' }}>{props.message}</div>}
+        {props.error && <div style={{ fontSize: 12, color: theme.danger, margin: '0 0 10px', wordBreak: 'break-word' }}>{props.error}</div>}
+        {props.busy && <div style={{ fontSize: 12, color: theme.textMuted, margin: '0 0 10px' }}>{t('正在重新链接…')}</div>}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {props.missingAssets.map((asset) => <RelinkRow key={asset.id} asset={asset} onRelink={props.onRelink} />)}
+          {props.missingAssets.map((asset) => <RelinkRow key={asset.id} asset={asset} busy={props.busy} onRelink={props.onRelink} />)}
           {props.missingAssets.length === 0 && <div style={{ fontSize: 12, color: theme.textDim }}>{t('没有待重链的素材')}</div>}
         </div>
         <div style={{ marginTop: 12 }}><button type="button" onClick={props.onClose}>{t('关闭')}</button></div>
@@ -132,12 +135,12 @@ export function RelinkAllDialog(props: RelinkAllDialogProps) {
   );
 }
 
-function RelinkRow({ asset, onRelink }: { asset: MediaAsset; onRelink: (id: string) => void }) {
+function RelinkRow({ asset, busy, onRelink }: { asset: MediaAsset; busy?: boolean; onRelink: (id: string) => void }) {
   const t = useT();
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 4, background: theme.panelAlt }}>
       <span style={{ flex: 1, fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{asset.name}</span>
-      <button type="button" className="primary" onClick={() => onRelink(asset.id)} style={{ flexShrink: 0 }}>{t('重新链接文件')}</button>
+      <button type="button" className="primary" disabled={busy} onClick={() => onRelink(asset.id)} style={{ flexShrink: 0 }}>{t('重新链接文件')}</button>
     </div>
   );
 }

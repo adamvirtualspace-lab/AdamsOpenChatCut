@@ -141,6 +141,25 @@ export function LibraryPanel({ semanticScopeId, templates, onAddTemplate, onAddA
     }
     setMainTab('字幕');
   };
+  // One-click "make captions from the current transcript": builds a caption track
+  // that reads the transcribed clips' words, then shows the Captions tab. Same
+  // result as prompting the agent "make captions from the transcription".
+  const makeCaptions = (sourceItemIds: string[]) => {
+    if (!sourceItemIds.length) return;
+    const target = captionTracks[0];
+    const captions: CaptionsData = {
+      enabled: true,
+      template: 'black-bar',
+      pacing: 'phrase',
+      sourceItemId: sourceItemIds[0]!,
+      sources: sourceItemIds.length > 1 ? sourceItemIds : undefined,
+      sourceMode: sourceItemIds.length > 1 ? 'item' : undefined,
+      bilingual: false,
+    };
+    if (target) onSetCaptions(captions, target.id);
+    else onCreateCaptionTrack(captions);
+    setMainTab('字幕');
+  };
   const importSrt = async (file: File) => {
     try {
       const words = parseSrt(await file.text());
@@ -170,7 +189,7 @@ export function LibraryPanel({ semanticScopeId, templates, onAddTemplate, onAddA
         <CaptionsPanel playerRef={playerRef} fps={fps} items={items} captionTracks={captionTracks} onSetCaptions={onSetCaptions} onUpdateCaptions={onUpdateCaptions} />
       ) : isTranscript ? (
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, borderTop: `0.5px solid ${theme.border}` }}>
-          <TranscriptPanel playerRef={playerRef} fps={fps} items={items} trackOptions={trackOptions} onSetItemTranscript={onSetItemTranscript} onToggleWord={onToggleWord} onCleanScript={onCleanScript} onSetGapCap={onSetGapCap} onSetTranscriptPlayOrder={onSetTranscriptPlayOrder} onReorderTrackItems={onReorderTrackItems} onClearEdits={onClearEdits} onClearTranscript={onClearTranscript} onImportSrt={(file) => { void importSrt(file); }} onOpenCaptionStyles={openCaptionStyles} />
+          <TranscriptPanel playerRef={playerRef} fps={fps} items={items} trackOptions={trackOptions} onSetItemTranscript={onSetItemTranscript} onToggleWord={onToggleWord} onCleanScript={onCleanScript} onSetGapCap={onSetGapCap} onSetTranscriptPlayOrder={onSetTranscriptPlayOrder} onReorderTrackItems={onReorderTrackItems} onClearEdits={onClearEdits} onClearTranscript={onClearTranscript} onImportSrt={(file) => { void importSrt(file); }} onMakeCaptions={makeCaptions} onOpenCaptionStyles={openCaptionStyles} />
         </div>
       ) : isSequences ? (
         <div className="cc-sequence-panel">

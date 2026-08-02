@@ -65,7 +65,28 @@ function uploadNameFromSrc(src: string): string | null {
   return isSafeUploadName(m[1]) ? m[1] : null;
 }
 
-function run(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string }> {
+/**
+ * Newest `out_time_us` in a chunk of ffmpeg `-progress pipe:1` output, in
+ * seconds. ffmpeg emits `out_time_us=N/A` before the first frame lands, which
+ * the digit-only match deliberately skips. Exported for the verify test.
+ */
+export function parseFfmpegProgressSeconds(chunk: string): number | undefined {
+  let seconds: number | undefined;
+  for (const line of chunk.split(/\r?\n/)) {
+    const match = /^out_time_us=(\d+)$/.exec(line.trim());
+    if (!match) continue;
+    const microseconds = Number(match[1]);
+    if (Number.isFinite(microseconds)) seconds = microseconds / 1_000_000;
+  }
+  return seconds;
+}
+
+function run(
+  cmd: string,
+  args: string[],
+  timeoutMs: number,
+  onStdout?: (chunk: string) => void,
+): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -83,7 +104,9 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: 
       child.kill('SIGKILL');
     }, timeoutMs);
     child.stdout?.on('data', (c: Buffer) => {
-      stdout += String(c);
+      const chunk = String(c);
+      onStdout?.(chunk);
+      stdout += chunk;
       if (stdout.length > 2_000_000) stdout = stdout.slice(-1_000_000);
     });
     child.stderr?.on('data', (c: Buffer) => {
@@ -95,6 +118,52 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: 
       ? undefined
       : new Error(`${cmd} exit ${code}: ${stderr.slice(-600)}`))));
   });
+}
+
+/**
+ * Normalization is one long blocking POST, so the encode's progress is published
+ * here and polled by the client at /api/normalize-media/progress. Without it the
+ * import bar parks at 92% for the whole transcode with no sign of life.
+ */
+interface NormalizeProgress {
+  active: boolean;
+  totalSec: number;
+  doneSec: number;
+  startedAt: number;
+}
+const normalizeProgress = new Map<string, NormalizeProgress>();
+/** Finished entries linger briefly so a final poll still sees 100% (not "unknown"). */
+const PROGRESS_RETENTION_MS = 30_000;
+
+function setProgress(name: string, next: NormalizeProgress): void {
+  normalizeProgress.set(name, next);
+  if (!next.active) {
+    setTimeout(() => {
+      const current = normalizeProgress.get(name);
+      if (current && !current.active) normalizeProgress.delete(name);
+    }, PROGRESS_RETENTION_MS).unref?.();
+  }
+}
+
+function progressReport(name: string): Record<string, unknown> {
+  const entry = normalizeProgress.get(name);
+  if (!entry) return { active: false, known: false, percent: 0, etaSec: null };
+  const elapsedSec = (Date.now() - entry.startedAt) / 1000;
+  // Rate is media-seconds encoded per wall-second (i.e. the "10x realtime" figure).
+  const rate = entry.doneSec > 0 && elapsedSec > 0 ? entry.doneSec / elapsedSec : 0;
+  const etaSec = rate > 0 && entry.totalSec > 0
+    ? Math.max(0, Math.round((entry.totalSec - entry.doneSec) / rate))
+    : null;
+  return {
+    active: entry.active,
+    known: true,
+    percent: entry.totalSec > 0 ? Math.min(100, Math.round((entry.doneSec / entry.totalSec) * 100)) : 0,
+    doneSec: Math.round(entry.doneSec),
+    totalSec: Math.round(entry.totalSec),
+    elapsedSec: Math.round(elapsedSec),
+    etaSec,
+    speed: rate ? Number(rate.toFixed(2)) : null,
+  };
 }
 
 export interface ProbeMeta {
@@ -263,6 +332,7 @@ async function encodeNormalized(
   targetBitrate: number,
   targetFps: number,
   convertToCfr: boolean,
+  onProgressSec?: (seconds: number) => void,
 ): Promise<void> {
   const filters = [`scale=${targetW}:${targetH}:flags=lanczos`];
   if (convertToCfr) {
@@ -275,6 +345,8 @@ async function encodeNormalized(
   for (const encoder of h264EncoderAttempts(preferred)) {
     const args = [
       '-nostdin', '-hide_banner', '-loglevel', 'error', '-y',
+      // Machine-readable progress on stdout so the client can show a real bar.
+      '-progress', 'pipe:1', '-nostats',
       '-i', inputPath,
       '-map', '0:v:0',
       ...(meta.hasAudio ? ['-map', '0:a:0?'] : ['-an']),
@@ -294,7 +366,12 @@ async function encodeNormalized(
     if (meta.hasAudio) args.push('-c:a', 'aac', '-b:a', VIDEO_AUDIO_BITRATE);
     args.push(outputPath);
     try {
-      await run(ffmpeg, args, FFMPEG_TIMEOUT_MS);
+      await run(ffmpeg, args, FFMPEG_TIMEOUT_MS, onProgressSec
+        ? (chunk) => {
+          const seconds = parseFfmpegProgressSeconds(chunk);
+          if (seconds !== undefined) onProgressSec(seconds);
+        }
+        : undefined);
       return;
     } catch (error) {
       lastError = error;
@@ -310,6 +387,19 @@ export function normalizeMediaPlugin(): Plugin {
   return {
     name: 'openchatcut-normalize-media',
     configureServer(server) {
+      // Registered before the POST route: Connect matches prefixes in order, so
+      // this must come first or /api/normalize-media would swallow it as a 405.
+      server.middlewares.use('/api/normalize-media/progress', (req, res) => {
+        const query = new URL(req.url ?? '/', 'http://localhost').searchParams;
+        const name = uploadNameFromSrc(query.get('src') ?? '');
+        if (!name) {
+          sendJson(res, 400, { error: 'src must be /media/uploads/<safe-name>' });
+          return;
+        }
+        res.setHeader('Cache-Control', 'no-store');
+        sendJson(res, 200, progressReport(name));
+      });
+
       server.middlewares.use('/api/normalize-media', async (req, res) => {
         if (req.method !== 'POST') {
           sendJson(res, 405, { error: 'method not allowed — use POST' });
@@ -393,7 +483,23 @@ export function normalizeMediaPlugin(): Plugin {
 
           server.config.logger.info(`[normalize-media] ${name}: ${reason}`);
           const convertToCfr = forceCfr || meta.variableFrameRate;
-          await encodeNormalized(inputPath, tmpPath, meta, targetW, targetH, targetBitrate, targetFps, convertToCfr);
+          const totalSec = playableDurationSeconds(meta);
+          setProgress(name, { active: true, totalSec, doneSec: 0, startedAt: Date.now() });
+          try {
+            await encodeNormalized(
+              inputPath, tmpPath, meta, targetW, targetH, targetBitrate, targetFps, convertToCfr,
+              (seconds) => {
+                const current = normalizeProgress.get(name);
+                if (current?.active) {
+                  setProgress(name, { ...current, doneSec: Math.min(totalSec || seconds, seconds) });
+                }
+              },
+            );
+            setProgress(name, { active: false, totalSec, doneSec: totalSec, startedAt: Date.now() });
+          } catch (error) {
+            setProgress(name, { active: false, totalSec, doneSec: 0, startedAt: Date.now() });
+            throw error;
+          }
 
           // Publish: if same path, atomic replace; if new .mp4 name, swap and drop old
           if (outPath === inputPath || basename(outPath) === name) {

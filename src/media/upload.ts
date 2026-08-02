@@ -268,10 +268,36 @@ async function uploadFile(file: File, onProgress?: UploadProgress): Promise<stri
 const newId = () => (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `a_${Date.now()}`;
 
 /** Post-upload conditional compress (server ffmpeg). No-op for already-efficient sources. */
+/**
+ * Poll the server's encode progress until stopped. The transcode is one long
+ * blocking POST, so this is the only signal available while it runs — without it
+ * the import bar sits at 92% for the entire re-encode.
+ */
+function pollNormalizeProgress(src: string, onRatio: (ratio: number) => void): () => void {
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const tick = async () => {
+    try {
+      const res = await fetch(`/api/normalize-media/progress?src=${encodeURIComponent(src)}`, { cache: 'no-store' });
+      if (res.ok) {
+        const data = (await res.json()) as { known?: boolean; percent?: number };
+        if (data.known && typeof data.percent === 'number') onRatio(data.percent / 100);
+      }
+    } catch {
+      /* transient — keep polling until the encode call settles */
+    }
+    if (!stopped) timer = setTimeout(() => void tick(), 1000);
+  };
+  void tick();
+  return () => { stopped = true; if (timer) clearTimeout(timer); };
+}
+
 export async function normalizeUploadedVideo(
   src: string,
   targetFps: number,
+  onProgress?: UploadProgress,
 ): Promise<{ src: string; width?: number; height?: number; durationSeconds?: number; fps?: number }> {
+  const stopPolling = onProgress ? pollNormalizeProgress(src, onProgress) : undefined;
   try {
     const res = await fetch('/api/normalize-media', {
       method: 'POST',
@@ -301,6 +327,8 @@ export async function normalizeUploadedVideo(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(t('视频兼容性处理失败：{error}', { error: message }));
+  } finally {
+    stopPolling?.();
   }
 }
 
@@ -375,7 +403,11 @@ export async function importMedia(
     let height = meta.height;
     let durationInFrames = meta.durationInFrames;
     if (kind === 'video') {
-      const norm = await normalizeUploadedVideo(srcRaw, fps);
+      // Re-encode occupies 0.92..1 — the longest phase for large masters, so it
+      // reports real ffmpeg progress rather than freezing the bar at 92%.
+      const norm = await normalizeUploadedVideo(srcRaw, fps, hooks.onProgress
+        ? (ratio) => hooks.onProgress!(0.92 + Math.max(0, Math.min(1, ratio)) * 0.08)
+        : undefined);
       src = norm.src;
       if (norm.width) width = norm.width;
       if (norm.height) height = norm.height;

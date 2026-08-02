@@ -8,6 +8,12 @@ export interface MediaMetadata {
 
 const IMAGE_SECONDS = 5;
 const GIF_SECONDS_FALLBACK = 5;
+// Some containers/codecs make a <video>/<audio>/<img> element neither fire
+// `loadedmetadata` nor `error` — it just stalls. Without a ceiling the probe
+// promise never settles and callers (e.g. importMedia during relink) hang
+// forever. Fall back to a default duration; for video the server normalize pass
+// re-probes exact width/height/duration anyway.
+const PROBE_TIMEOUT_MS = 15_000;
 const VIDEO_EXTENSIONS = ['.mp4', '.m4v', '.mov', '.webm'];
 const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.avif', '.heic', '.heif'];
 const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.opus', '.flac'];
@@ -82,9 +88,18 @@ function probeTimed(url: string, kind: 'video' | 'audio', fps: number, release: 
 }
 
 export function probeMediaSource(url: string, kind: MediaKind, fps: number, release: () => void = () => undefined): Promise<MediaMetadata> {
-  if (kind === 'image' || kind === 'svg') return probeStill(url, Math.round(IMAGE_SECONDS * fps), release);
-  if (kind === 'gif') return probeGif(url, fps, release);
-  return probeTimed(url, kind, fps, release);
+  let released = false;
+  const releaseOnce = () => { if (!released) { released = true; release(); } };
+  const fallbackSeconds = kind === 'gif' ? GIF_SECONDS_FALLBACK : IMAGE_SECONDS;
+  const probe = (kind === 'image' || kind === 'svg') ? probeStill(url, Math.round(IMAGE_SECONDS * fps), releaseOnce)
+    : kind === 'gif' ? probeGif(url, fps, releaseOnce)
+    : probeTimed(url, kind, fps, releaseOnce);
+  // Never let a stalled media element hang the caller — race the probe against a
+  // ceiling that resolves a safe fallback (and revokes the object URL).
+  const timeout = new Promise<MediaMetadata>((resolve) => {
+    setTimeout(() => { releaseOnce(); resolve({ durationInFrames: Math.round(fallbackSeconds * fps) }); }, PROBE_TIMEOUT_MS);
+  });
+  return Promise.race([probe, timeout]);
 }
 
 export function probeMediaFile(file: File, kind: MediaKind, fps: number): Promise<MediaMetadata> {

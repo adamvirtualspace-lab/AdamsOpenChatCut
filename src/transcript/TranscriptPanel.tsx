@@ -29,6 +29,8 @@ interface TranscriptPanelProps {
   /** Drop a clip's transcript entirely, and everything derived from it. */
   onClearTranscript: (id: string) => void;
   onImportSrt: (file: File) => void;
+  /** Build a caption track from the given transcribed clips' words. */
+  onMakeCaptions: (sourceItemIds: string[]) => void;
   onOpenCaptionStyles?: (sourceItemIds: string[]) => void;
 }
 
@@ -40,10 +42,10 @@ export function TranscriptPanel({
   playerRef, fps, items, trackOptions,
   onSetItemTranscript, onToggleWord, onCleanScript, onSetGapCap, onSetTranscriptPlayOrder, onReorderTrackItems, onClearEdits,
   onClearTranscript,
-  onImportSrt, onOpenCaptionStyles,
+  onImportSrt, onMakeCaptions, onOpenCaptionStyles,
 }: TranscriptPanelProps) {
   const t = useT();
-  const { status, error, progressNote, runMany, reset } = useTranscript();
+  const { status, error, progressNote, busy, runMany, reset } = useTranscript();
   const defaultId = useMemo(() => pickDefaultTrack(trackOptions, items), [trackOptions, items]);
   const [track, setTrack] = useState<TrackId | null>(defaultId);
   // Both views use ScriptView (speaker blocks + Gap rows). segment uses a lower
@@ -77,7 +79,6 @@ export function TranscriptPanel({
   }, [track, trackOptions, defaultId]);
 
   const activeTrack = trackOptions.find((t) => t.id === track) ?? null;
-  const busy = status === 'uploading' || status === 'processing';
 
   const allClips = useMemo(() => (track ? mediaOnTrack(items, track) : []), [items, track]);
   const speechClips = useMemo(() => allClips.filter((c) => !isLikelyNonSpeech(c)), [allClips]);
@@ -221,6 +222,15 @@ export function TranscriptPanel({
           {confirmDelete
             ? t('确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销', { n: transcribed.length })
             : t('删除文字稿')}
+        </button>
+        <button
+          type="button"
+          className="cc-tx-btn"
+          disabled={!transcribed.length}
+          title={transcribed.length ? t('用当前文字稿生成字幕') : t('该轨还没有文字稿')}
+          onClick={() => onMakeCaptions(transcribed.map((item) => item.id))}
+        >
+          <Icon name="captions" size={13} />{t('生成字幕')}
         </button>
         <span className="cc-tx-spacer" />
         {pauseOpen && (
