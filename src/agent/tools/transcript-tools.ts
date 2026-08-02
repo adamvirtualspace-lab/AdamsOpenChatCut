@@ -1,10 +1,11 @@
-import type { AgentToolSchema } from '../tool-schema';
+export { TRANSCRIPT_TOOL_SCHEMAS, TRANSCRIPT_TOOL_NAMES } from './schemas/transcript-tools';
 import type { AgentContext } from '../context';
 import { defaultTrackId, resolveTrackId, trackAlias, type TimelineItem, type TrackId } from '../../editor/types';
 import { transcribePath as assemblyaiTranscribePath } from '../../transcript/assemblyai';
 import { transcribePath as whisperTranscribePath } from '../../transcript/whisper';
 import type { TranscriptResult } from '../../transcript/types';
 import { fillerIndices } from '../../transcript/edit';
+import { hasOperationalTranscript } from '../../transcript/types';
 import { srtToTranscript } from '../../transcript/srt';
 import { normalizeLanguage, transcriptionSettings } from '../../transcript/provider-settings';
 
@@ -24,159 +25,7 @@ import { buildSilenceGapCaps, parseCleanOnly, parseSilenceRule, type SilenceRule
 import type { Action } from '../../editor/reduce';
 import { execFindTranscript, findPhrase, normalize } from './transcript-find';
 import { execReadTranscript } from './transcript-read';
-
-// Agent tools for the transcript / caption / "delete text = delete video" surface.
-// Names + semantics: transcribe (import_media/manage_transcript),
-// find_transcript, clean_script, delete_text (apply_script), edit_captions.
-
-export const TRANSCRIPT_TOOL_SCHEMAS: AgentToolSchema[] = [
-  {
-    name: 'read_transcript',
-    description: 'Read the current timeline transcript as a compact phrase view for planning and semantic editing. This is the default transcript reading surface for long videos and multiple takes: words are grouped by speaker changes, pauses, and a bounded phrase size while retaining source item, source timestamps, timeline frames, and original word-index ranges. Deleted/trimmed words are omitted, but the word-level transcript remains unchanged for precise edits. Use find_transcript when locating a specific quote instead.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        itemId: { type: 'string', description: 'Optional clip id or unique prefix. Omit to read all transcribed clips.' },
-        track: { type: 'string', description: 'Optional track alias/id. Ignored when itemId is set.' },
-        silenceThresholdSeconds: { type: 'number', minimum: 0, maximum: 10, description: 'Start a new phrase after this pause; defaults to 0.5 seconds.' },
-        maxWordsPerPhrase: { type: 'integer', minimum: 1, maximum: 100, description: 'Hard cap for uninterrupted speech; defaults to 40 words.' },
-        offset: { type: 'integer', minimum: 0, description: 'Phrase offset for pagination; defaults to 0.' },
-        limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Maximum phrases to return; defaults to 80.' },
-      },
-    },
-  },
-  {
-    name: 'transcribe_track',
-    description: 'Transcribe every audio/video clip on a track — word-level timestamps, using the configured provider (AssemblyAI cloud or local Whisper). This is THE tool for transcription; never try to run ffmpeg or Whisper manually in a sandbox. Required before find_transcript / clean_script / delete_text / captions when clips have no transcript yet.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        track: { type: 'string', description: 'Track alias or stable id whose audio to transcribe (default A1).' },
-        language: { type: 'string', description: "Spoken language as ISO-639-1, e.g. 'id', 'en', 'zh'. Omit to use the configured TRANSCRIPTION_LANGUAGE, or auto-detect when that is unset. Setting the wrong language does not fail — it returns confident nonsense — so pass it when you know it." },
-        replace: { type: 'boolean', description: 'Re-transcribe clips that already have a transcript (default false — they are skipped). Use when switching provider, model, or language.' },
-      },
-    },
-  },
-  {
-    name: 'import_transcript',
-    description: 'Attach an existing SubRip (.srt) or WebVTT (.vtt) subtitle file to a clip as its word-level transcript, INSTEAD of running ASR. Use when the user already has a subtitle file — it is faster than transcribe_track and keeps their own wording, timings, and language. Cue spans are divided across words by length, so find_transcript / clean_script / delete_text / captions all work afterwards. Provide the file with `srt` (raw text) or `path` (a /media/uploads/... URL served by this app). Targets one clip via itemId, else the first audio/video clip on `track`. Subtitle times are treated as offsets into the clip SOURCE, so the file must match the clip it is attached to.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        srt: { type: 'string', description: 'Raw .srt/.vtt file contents. Use this OR path.' },
-        path: { type: 'string', description: 'App-served subtitle URL, e.g. /media/uploads/clip.srt. Use this OR srt.' },
-        itemId: { type: 'string', description: 'Target clip id or unique prefix. Omit to use the first audio/video clip on the track.' },
-        track: { type: 'string', description: 'Track alias/id used when itemId is omitted (default A1).' },
-        replace: { type: 'boolean', description: 'Overwrite an existing transcript on the clip (default false — an existing transcript is left alone).' },
-      },
-    },
-  },
-  {
-    name: 'find_transcript',
-    description: 'Find WHEN a phrase is spoken — a time-coordinate lookup, not a transcript reader or editing tool. Returns matches with their timeline frame range (fromFrame/toFrame) so you can anchor B-roll, motion graphics, markers, or overlays at that moment (or locate a spot before delete_text). Default: contiguous case/punctuation/whitespace-insensitive match over every transcribed clip on the timeline; edits are respected (deleted words won\'t match). asset = search ONE asset\'s raw transcript regardless of timeline use (library lookup, ignores edits). track = restrict to that track. fuzzy = token-order match with window tolerance (use when ASR may have fillers like "uh," between query tokens). includeWordTimestamps = add a Words block under each match with each word\'s start → end time — use when syncing animation beats to which word is being said; skip for plain phrase anchoring (extra output). limit = max results (default 10).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        query: { type: 'string', description: 'Text to search for.' },
-        asset: { type: 'string', description: 'Asset ID or prefix ID. Omit to search across the whole project.' },
-        track: { type: 'string', description: 'Track alias (V1/A1/...) or track id. Restricts the search to that track.' },
-        fuzzy: { type: 'boolean', description: 'Token-window match (tolerates fillers between tokens).' },
-        includeWordTimestamps: { type: 'boolean', description: 'Include per-word timestamps inside each match (default false). Adds a Words block under each match with each word\'s start -> end time. Use when syncing animation beats to speech cadence (e.g., MG internal rhythm matched to which word is being said).' },
-        limit: { type: 'integer', description: 'Max results returned (default 10).' },
-      },
-      required: ['query'],
-    },
-  },
-  {
-    name: 'clean_script',
-    description: 'Mechanically clean transcribed clips with fixed filler removal and typed pause rules. only may be "fillers", "silence", or "fillers,silence". silence accepts compress:400, restore:500, normalize:500, range:300-800, plus legacy max:400, min:500, 500, and min:300,max:800. Rules that lengthen a pause never exceed the silence present in the recording. Existing maxPauseSeconds/removeFillers calls remain supported. The whole operation is one undo step.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        track: { type: 'string', description: 'Track alias/id whose voiceover clips to clean (default A1). Cleans every transcribed clip on it.' },
-        itemId: { type: 'string', description: 'Optional: clean only this one clip instead of the whole track.' },
-        only: { type: 'string', description: 'Run fillers, silence, or both as fillers,silence. Omit for existing default behavior.' },
-        silence: { type: 'string', description: 'Pause rule: compress:400, restore:500, normalize:500, range:300-800, or legacy syntax.' },
-        longSilence: { type: 'number', description: 'Long-pause threshold in ms for the default silence rule (pauses at/above it compress to 200ms). Default 3000 when only includes silence and no silence rule is supplied.' },
-        maxPauseSeconds: { type: 'number', description: 'Compress pauses longer than this down to it (e.g. 0.5). Omit to leave pauses.' },
-        removeFillers: { type: 'boolean', description: 'Strip filler words (default true).' },
-        cutPadMs: { type: 'number', minimum: 0, maximum: 500, description: 'Breathing room kept around each word cut, split between the two sides (e.g. 150). Borrowed from silence already in the recording, so it never bleeds into a neighbouring word. 0 or omitted cuts exactly on the word boundary.' },
-      },
-    },
-  },
-  {
-    name: 'edit_gap',
-    description:
-      'List or edit breath/silence gaps between spoken words on a transcribed clip. Gaps are computed from word timestamps (next.start − prev.end), not separate assets. action=list returns visible gaps with afterWordIndex/gapSeconds/context. action=delete removes one gap (silence→0, later audio ripples earlier). action=cap compresses one gap to maxSeconds (e.g. 0.2). action=restore clears a per-gap override so the original pause returns. Prefer list first to get afterWordIndex. For batch whole-track pause cleanup use clean_script instead.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        action: {
-          type: 'string',
-          enum: ['list', 'delete', 'cap', 'restore'],
-          description: 'list=enumerate gaps; delete=remove one gap; cap=compress one gap; restore=undo per-gap override.',
-        },
-        track: { type: 'string', description: 'Track alias/id (default A1) when itemId omitted.' },
-        itemId: { type: 'string', description: 'Target clip id (prefix ok). Prefer when multiple clips share a track.' },
-        afterWordIndex: {
-          type: 'number',
-          description: 'Word index AFTER the gap (from list). Required for delete/cap/restore unless afterText is given.',
-        },
-        afterText: {
-          type: 'string',
-          description: 'Locate gap by the spoken phrase that STARTS after the gap (matched in transcript). Alternative to afterWordIndex.',
-        },
-        gapIndex: {
-          type: 'number',
-          description: '0-based index among listable gaps on the clip (from list). Alternative to afterWordIndex.',
-        },
-        maxSeconds: {
-          type: 'number',
-          description: 'cap only: max pause seconds to keep (e.g. 0.2 or 0.5). Required for cap.',
-        },
-        minGapSeconds: {
-          type: 'number',
-          description: 'list only: min raw gap to include (default 0.25s).',
-        },
-      },
-      required: ['action'],
-    },
-  },
-  {
-    name: 'delete_text',
-    description: 'Delete a spoken phrase from a track — "delete text = delete video": the matching words\' audio and their time are cut and the clip re-times. If unsure of the exact wording, find_transcript first. ⚠ AUDIO clips only re-time this way; a VIDEO clip always plays continuously from srcInFrame — deleting its words cuts NOTHING (captions keep mirroring the audible speech, so the deletion has no visible effect). To cut a video clip use split_item / edit_item (srcInFrame + durationInFrames); to hide individual words from captions use edit_captions action=display_text.',
-    input_schema: { type: 'object', properties: { track: { type: 'string' }, query: { type: 'string', description: 'The phrase to delete (matched against the transcript).' } }, required: ['query'] },
-  },
-  {
-    name: 'manage_transcript',
-    description: 'Correct source transcripts and manage translation variants without changing the timeline; word timing, frame positions, word count, and clip duration remain unchanged. Six actions:\n'
-      + '- fix: correct the source transcript. For a word, pass wordIndex or find with the incorrect source text plus text with the correction; only word.text changes. To rename or merge a speaker, pass from with an existing label such as "A" plus to with the new display name; passing another existing label merges them. Only word.speaker changes.\n'
-      + '- retry_transcription: force ASR to rerun for the clip and replace its transcript when transcription is stuck, failed, or needs refreshing.\n'
-      + '- translation_create: translate the full transcript to lang and create or replace a word-level translation variant sharing the source timeline.\n'
-      + '- translation_ensure: idempotently reuse an existing variant for lang or create it otherwise. Prefer this for ordinary translation requests.\n'
-      + '- translation_list: list the source transcript and all translation variants with id/lang/word count.\n'
-      + '- translation_read: read words from a translation variant selected by lang or targetLanguage.\n'
-      + 'Translation variants contain translated text only. To display a language in captions, use edit_captions language_mode.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['fix', 'retry_transcription', 'translation_create', 'translation_ensure', 'translation_list', 'translation_read'], description: 'See the tool description: correct words/speakers, rerun ASR, or create/ensure/list/read translation variants.' },
-        itemId: { type: 'string', description: 'Target clip item id; omit to use the first transcribed audio/video clip on the track.' },
-        track: { type: 'string', description: 'When itemId is omitted, locate by track alias or stable id; default A1.' },
-        wordIndex: { type: 'number', description: 'fix word: index of the word to correct; mutually exclusive with find.' },
-        find: { type: 'string', description: 'fix word: incorrect source text that must match exactly one word; mutually exclusive with wordIndex.' },
-        text: { type: 'string', description: 'fix word: corrected text.' },
-        from: { type: 'string', description: 'fix speaker: existing speaker label to rename, such as "A" or "B".' },
-        to: { type: 'string', description: 'fix speaker: new display name; passing an existing label merges the speakers, for example "B" to "A".' },
-        lang: { type: 'string', description: 'translation_create/ensure: target language, such as English, Chinese, or Japanese; translation_read: variant language to read.' },
-        targetLanguage: { type: 'string', description: 'translation_read: alias of lang for selecting the translated language.' },
-      },
-      required: ['action'],
-    },
-  },
-];
-
-export const TRANSCRIPT_TOOL_NAMES = new Set(TRANSCRIPT_TOOL_SCHEMAS.map((t) => t.name));
+import { execSearchMedia } from './media-search';
 
 type Args = Record<string, unknown>;
 
@@ -186,7 +35,7 @@ type Args = Record<string, unknown>;
 // audio clip on a track, optionally requiring an attached transcript
 function trackClip(ctx: AgentContext, track: TrackId, needTranscript: boolean): TimelineItem | null {
   return ctx.getState().items.find((it) =>
-    (it.kind === 'audio' || it.kind === 'video') && it.track === track && it.src && (!needTranscript || (it.transcript?.length ?? 0) > 0)) ?? null;
+    (it.kind === 'audio' || it.kind === 'video') && it.track === track && it.src && (!needTranscript || hasOperationalTranscript(it))) ?? null;
 }
 
 function resolveClip(ctx: AgentContext, track: TrackId, itemId: unknown, needTranscript: boolean): TimelineItem | null {
@@ -287,7 +136,7 @@ async function manageTranscript(args: Args, ctx: AgentContext, track: TrackId, a
     }
   }
 
-  if (!it.transcript?.length) return { error: `item ${it.id} has no transcript; call transcribe_track first` };
+  if (!hasOperationalTranscript(it)) return { error: `item ${it.id} has no current transcript; call transcribe_track first` };
 
   if (action === 'fix') {
     // fix supports ASR word correction or speaker rename/merge, routed by fields.
@@ -430,6 +279,7 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
   // Runs before the A1 default below: a subtitle file targets a CLIP, and that clip
   // is often a video on V1 with no audio track in the project at all.
   if (name === 'import_transcript') return execImportTranscript(args, ctx);
+  if (name === 'search_media') return execSearchMedia(args, ctx);
   const state = ctx.getState();
   // Speech usually lives on A1, but a project can be video-only (a camera file with
   // its own audio on V1). Falling back to the video track keeps find_transcript /
@@ -449,7 +299,7 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
       const results: { itemId: string; words: number; text: string; skipped?: boolean }[] = [];
       try {
         for (const it of clips) {
-          if (it.transcript?.length && args.replace !== true) {
+          if (hasOperationalTranscript(it) && args.replace !== true) {
             results.push({ itemId: it.id, words: it.transcript.length, text: '', skipped: true });
             continue;
           }
@@ -470,8 +320,8 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
       // transcribed clip on the track, not just the first. itemId narrows to one clip.
       const targetId = typeof args.itemId === 'string' ? args.itemId : '';
       const clips = targetId
-        ? state.items.filter((x) => (x.id === targetId || x.id.startsWith(targetId)) && (x.transcript?.length ?? 0) > 0)
-        : state.items.filter((x) => x.track === track && (x.transcript?.length ?? 0) > 0);
+        ? state.items.filter((x) => (x.id === targetId || x.id.startsWith(targetId)) && hasOperationalTranscript(x))
+        : state.items.filter((x) => x.track === track && hasOperationalTranscript(x));
       if (!clips.length) return { error: targetId ? `no transcribed item ${targetId}` : `no transcript on ${alias}; call transcribe_track first` };
       const fps = state.fps;
       const usesTypedArgs = args.only != null || args.silence != null || args.longSilence != null;
@@ -538,7 +388,7 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
     case 'edit_gap': {
       const action = String(args.action ?? '');
       const it = resolveClip(ctx, track, args.itemId, true);
-      if (!it?.transcript?.length) {
+      if (!hasOperationalTranscript(it)) {
         return { error: args.itemId ? `no transcribed item ${String(args.itemId)}` : `no transcript on ${alias}; call transcribe_track first` };
       }
       const minGap = typeof args.minGapSeconds === 'number' ? args.minGapSeconds : 0.25;
@@ -608,7 +458,7 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
     }
     case 'delete_text': {
       const it = trackClip(ctx, track, true);
-      if (!it?.transcript) return { error: `no transcript on ${alias}; call transcribe_track first` };
+      if (!hasOperationalTranscript(it)) return { error: `no current transcript on ${alias}; call transcribe_track first` };
       const m = findPhrase(it.transcript, String(args.query ?? ''));
       if (!m) return { deleted: false, query: args.query, note: 'phrase not found' };
       const idxs = Array.from({ length: m.count }, (_, k) => m.start + k);

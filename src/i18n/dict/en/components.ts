@@ -15,6 +15,10 @@ export default {
   // ---- Editor.tsx ("Generated with AI" chat pre-fill) ----
   '参考模板「{name}」，用 create_motion_graphic 生成一个类似风格的动画： @{name} ':
     'Using template "{name}" as a style reference, generate a similar animation with create_motion_graphic: @{name} ',
+  '工程保存失败。请重试；在保存成功前不会关闭或切换工程。':
+    'Project save failed. Retry before closing or switching projects.',
+  '工程仍未保存，已阻止离开。请继续编辑以重试保存。':
+    'The project is still unsaved, so navigation was blocked. Keep editing to retry.',
 
   // ---- Relative time (shared by Dashboard / ExportHistory / VersionHistory) ----
   '刚刚': 'Just now',
@@ -26,16 +30,20 @@ export default {
   '· 我的工程': '· My Projects',
   '设置 · API 密钥': 'Settings · API Keys',
   '配置模型后开始使用 Agent': 'Configure a model to start using the Agent',
-  '添加任一模型厂商的 API 密钥，即可在编辑器中使用对话式剪辑。': 'Add an API key for any model provider to use conversational editing in the editor.',
+  '配置任一云端或本地模型，即可在编辑器中使用对话式剪辑。': 'Configure any cloud or local model to use conversational editing in the editor.',
   '配置模型': 'Configure Model',
   '处理中…': 'Processing…',
   '失败:{error}': 'Failed: {error}',
   '工程': 'Projects',
   '清理所有工程都不引用的上传素材(测试/已删工程残留)': 'Clean up uploaded assets no project references (leftovers from tests/deleted projects)',
   '清理素材': 'Clean Up Media',
-  '导入 .ccproj.json 工程文件(含素材;可来自浏览器版/其它机器)': 'Import a .ccproj.json project file (with assets; from the browser version or another machine)',
+  '导入 .ccproj 工程文件(兼容旧 .ccproj.json)': 'Import a .ccproj project file (legacy .ccproj.json is also supported)',
   '导入工程': 'Import Project',
   '{n} 个': '{n} total',
+  '{n} / {total} 个': '{n} of {total}',
+  '搜索工程': 'Search projects',
+  '清除搜索': 'Clear search',
+  '没有找到匹配“{query}”的工程': 'No projects match “{query}”',
   '新建工程': 'New Project',
   '打开 {name}': 'Open {name}',
   '双击重命名': 'Double-click to rename',
@@ -44,7 +52,7 @@ export default {
   '已永久删除「{name}」': 'Permanently deleted “{name}”',
   '重命名': 'Rename',
   '复制': 'Duplicate',
-  '导出为 .ccproj.json(含素材,可在桌面版/其它机器导入)': 'Export as .ccproj.json (with assets; importable in the desktop version or on another machine)',
+  '导出为流式 .ccproj(含素材,可在桌面版/其它机器导入)': 'Export as streaming .ccproj (with assets; importable on another machine)',
   '删除': 'Delete',
 
   // ---- ExportHistory ----
@@ -170,6 +178,17 @@ export default {
   '展开属性': 'Expand properties',
   '收起属性': 'Collapse properties',
   '属性': 'Properties',
+  '片段属性': 'Clip properties',
+  '片段': 'Clip',
+  '图片': 'Image',
+  '动效图形': 'Motion graphic',
+  '仅作用于当前时间线片段，不修改媒体池中的源文件。': 'Affects only this timeline clip; the source file in the media pool is unchanged.',
+  '仅作用于当前时间线片段。': 'Affects only this timeline clip.',
+  '没有更早的关键帧': 'No earlier keyframe',
+  '没有更晚的关键帧': 'No later keyframe',
+  '属性分类': 'Property categories',
+  '基础': 'Basic',
+  '动画': 'Animation',
   '人声隔离': 'Voice Isolation',
   '隔离强度': 'Isolation strength',
   '应用人声隔离': 'Apply voice isolation',

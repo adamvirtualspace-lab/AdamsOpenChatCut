@@ -8,10 +8,13 @@ import { projectStorePlugin } from "./project-store.ts";
 import { extensionStorePlugin } from "./extension-store.ts";
 import { exportPlugin } from "./export.ts";
 import { exportQaPlugin } from "./export-qa.ts";
+import { exportDestinationPlugin } from "./export-destination.ts";
+import { exportStagePlugin } from "./export-stage.ts";
 import { uploadPlugin } from "./upload.ts";
 import { mobileUploadPlugin } from "./mobile-upload.ts";
 import { uploadMultipartPlugin } from "./upload-multipart.ts";
 import { extractAudioPlugin } from "./extract-audio.ts";
+import { assemblyAiUploadPlugin } from "./assemblyai-upload.ts";
 import { extractFramesPlugin } from "./extract-frames.ts";
 import { sceneDetectionPlugin } from "./scene-detection.ts";
 import { autoGradePlugin } from "./auto-grade.ts";
@@ -30,6 +33,7 @@ import { stockSearchPlugin } from "./stock.ts";
 import { firecrawlPlugin } from "./firecrawl.ts";
 import { settingsPlugin } from "./settings.ts";
 import { externalAgentPlugin } from "./external-agent.ts";
+import { codexAgentPlugin } from "./codex-agent.ts";
 import { llmProxyPlugin } from "./llm-proxy.ts";
 import { whisperPlugin } from "./whisper.ts";
 import { resourcePreviewPlugin } from "./resource-preview.ts";
@@ -46,14 +50,18 @@ export function serverPlugins(): Plugin[] {
     projectStorePlugin(),
     extensionStorePlugin(),
     externalAgentPlugin(),
+    codexAgentPlugin(),
     settingsPlugin(),
+    exportStagePlugin(),
     exportPlugin(),
+    exportDestinationPlugin(),
     exportQaPlugin(),
     uploadMultipartPlugin(),
     uploadPlugin(),
     mobileUploadPlugin(),
     extractAudioPlugin(),
     whisperPlugin(),
+    assemblyAiUploadPlugin(),
     extractFramesPlugin(),
     sceneDetectionPlugin(),
     autoGradePlugin(),

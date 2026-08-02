@@ -3,7 +3,7 @@ import type { PlayerRef } from '@remotion/player';
 import type { TimelineItem, TrackId } from '../editor/types';
 import { emitSelectionRef, transcriptRefFromDomSelection, useSelectionRefMode } from '../agent/selection-refs';
 import { useTranscript } from './useTranscript';
-import { msToFrame, type TranscriptWord } from './types';
+import { hasOperationalTranscript, msToFrame, type TranscriptWord } from './types';
 import { analyzeSilences } from './segment';
 import { ScriptView } from './TranscriptViews';
 import { theme } from '../theme';
@@ -28,6 +28,7 @@ interface TranscriptPanelProps {
   onClearEdits: (id: string) => void;
   /** Drop a clip's transcript entirely, and everything derived from it. */
   onClearTranscript: (id: string) => void;
+  onImportSrt: (file: File) => void;
   onOpenCaptionStyles?: (sourceItemIds: string[]) => void;
 }
 
@@ -39,7 +40,7 @@ export function TranscriptPanel({
   playerRef, fps, items, trackOptions,
   onSetItemTranscript, onToggleWord, onCleanScript, onSetGapCap, onSetTranscriptPlayOrder, onReorderTrackItems, onClearEdits,
   onClearTranscript,
-  onOpenCaptionStyles,
+  onImportSrt, onOpenCaptionStyles,
 }: TranscriptPanelProps) {
   const t = useT();
   const { status, error, progressNote, runMany, reset } = useTranscript();
@@ -66,6 +67,7 @@ export function TranscriptPanel({
   // selection mode (transcript-selected): drag-select words → structured reference
   const pickMode = useSelectionRefMode();
   const bodyRef = useRef<HTMLDivElement>(null);
+  const srtInputRef = useRef<HTMLInputElement>(null);
 
   // Keep selection valid when project tracks change.
   useEffect(() => {
@@ -89,7 +91,7 @@ export function TranscriptPanel({
     || clips[0]
     || null;
 
-  const editable = !!focusItem?.transcript?.length;
+  const editable = hasOperationalTranscript(focusItem);
   /** any clip on the track already has words (not only the focused chip) */
   const trackHasWords = transcribed.length > 0;
   const focusDeleted = new Set(focusItem?.deletedWordIdx ?? []);
@@ -138,7 +140,7 @@ export function TranscriptPanel({
   }, [clips, showAllSections, focusItem]);
 
   const applyPause = () => {
-    if (!focusItem?.transcript?.length) return;
+    if (!hasOperationalTranscript(focusItem)) return;
     const w = focusItem.transcript;
     const { count, savedMs } = analyzeSilences(w, compressSec * 1000);
     const fillers = w.filter((x) => /^[\s]*([uU][hm]+|[eE]r+m?|嗯|呃|啊|唔|额)[\s.,]*$/.test(x.text)).length;
@@ -169,6 +171,20 @@ export function TranscriptPanel({
           className={`cc-tx-btn${editMode ? ' active' : ''}`}
         >
           <Icon name="pencil" size={13} />{t('编辑')}
+        </button>
+        <input
+          ref={srtInputRef}
+          type="file"
+          accept=".srt,application/x-subrip,text/plain"
+          hidden
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = '';
+            if (file) onImportSrt(file);
+          }}
+        />
+        <button type="button" className="cc-tx-btn" title={t('导入 SRT')} onClick={() => srtInputRef.current?.click()}>
+          <Icon name="upload" size={13} />{t('导入 SRT')}
         </button>
         <button
           type="button"
@@ -322,7 +338,7 @@ export function TranscriptPanel({
                       const n = c.transcript?.length ?? 0;
                       return (
                         <option key={c.id} value={c.id}>
-                          {i + 1}/{clips.length} · {clipLabel(c, 40)}{n ? t(' · {n}词', { n }) : t(' · 未转写')}
+                          {i + 1}/{clips.length} · {clipLabel(c, 40)}{n ? t(' · {n}词', { n }) : t(' · 未转写')}{c.transcriptStale ? t(' · 已失效') : ''}
                         </option>
                       );
                     })}
@@ -371,6 +387,7 @@ export function TranscriptPanel({
                 const cWords = c.transcript ?? [];
                 const cDel = new Set(c.deletedWordIdx ?? []);
                 const active = focusItem?.id === c.id;
+                const operational = hasOperationalTranscript(c);
                 const idx = clips.findIndex((x) => x.id === c.id);
                 const minDisplayMs = view === 'paragraph' ? 400 : 250;
                 const canDragClip = clips.length > 1 && !!track;
@@ -430,7 +447,7 @@ export function TranscriptPanel({
                       <span className="cc-tx-muted">
                         {(c.durationInFrames / fps).toFixed(1)}s
                         {cWords.length ? t(' · {n} 词', { n: cWords.length }) : t(' · 未转写')}
-                        {c.transcriptPlayOrder?.length ? t(' · 已重排语段') : ''}
+                        {c.transcriptStale ? t(' · 转写已失效，仅供查看') : c.transcriptPlayOrder?.length ? t(' · 已重排语段') : ''}
                       </span>
                     </header>
                     {!cWords.length ? (
@@ -439,7 +456,7 @@ export function TranscriptPanel({
                       <ScriptView
                         words={cWords}
                         deleted={cDel}
-                        editMode={editMode && active}
+                        editMode={editMode && active && operational}
                         fps={fps}
                         gapCapsMs={c.gapCapsMs}
                         silenceFrames={c.silenceFrames}
@@ -447,19 +464,23 @@ export function TranscriptPanel({
                         minDisplayMs={minDisplayMs}
                         onWord={(w) => {
                           if (pickMode) return; // selection mode: words are for drag-select, not seek/delete
+                          if (!operational) return;
                           setFocusItemId(c.id);
                           if (editMode) onToggleWord(c.id, w.gi);
                           else playerRef.current?.seekTo(c.startFrame + msToFrame(w.start, fps));
                         }}
                         onDeleteGap={(afterGi) => {
+                          if (!operational) return;
                           setFocusItemId(c.id);
                           onSetGapCap(c.id, afterGi, 0);
                         }}
                         onCapGap={(afterGi, maxMs) => {
+                          if (!operational) return;
                           setFocusItemId(c.id);
                           onSetGapCap(c.id, afterGi, maxMs);
                         }}
                         onReorderSpeech={(order) => {
+                          if (!operational) return;
                           setFocusItemId(c.id);
                           onSetTranscriptPlayOrder(c.id, order);
                         }}

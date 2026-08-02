@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { theme, themeAlpha } from '../../theme';
 import type { EditorCommands } from '../../editor/store';
 import { removeItemsFromState } from '../../editor/multiSelect';
+import { setLinkGroup, unlinkItems } from '../../editor/linkGroups';
 import { canMulticamItem, runMulticamSync } from '../../multicam/sync';
 import { TRANSITION_LABELS, ZOOM_SHAPE_LABELS, type TimelineItem, type TimelineState, type TransitionItem } from '../../editor/types';
 import { ALL_FX, LUT_EFFECTS } from '../../gl/fx/effects';
@@ -10,6 +11,15 @@ import { useT } from '../../i18n/locale';
 
 // speed presets for the variable speed submenu
 const SPEED_PRESETS = [0.25, 0.5, 1, 1.5, 2, 4] as const;
+const SPEED_PRESET_EPSILON = 0.01;
+
+function displaySpeedRate(rate: number): number {
+  return Number(rate.toFixed(3));
+}
+
+function matchesSpeedPreset(rate: number, preset: number): boolean {
+  return Math.abs(rate - preset) < SPEED_PRESET_EPSILON;
+}
 
 // Clip right-click menu. AI multi-camera synchronization: client audio alignment (src/multicam).
 
@@ -62,15 +72,32 @@ export function ClipContextMenu({ item, transitions, x, y, playhead, commands, t
   // If only one selected but right-clicked a media clip, still require multi-select
   const multicamReady = multicamIds.length >= 2;
   const multicamHint = multicamReady
-    ? t('对 {n} 个片段做音频对齐', { n: multicamIds.length })
+    ? t('对 {n} 个片段按时间码、采集时钟或音频依次对齐', { n: multicamIds.length })
     : batchN < 2 && selectedIds.length < 2
       ? t('先框选 2 个及以上视频/音频片段')
       : t('多机位同步只支持带媒体的视频/音频片段');
+  const multicamGroup = item.multicamGroupId
+    ? timeline.multicamGroups?.find((group) => group.id === item.multicamGroupId)
+    : timeline.multicamGroups?.find((group) => group.angles.some((angle) => angle.itemId === item.id));
+  const linkedGroup = timeline.linkGroups?.find((group) => group.mode === 'linked' && group.itemIds.includes(item.id));
+  const syncLockGroup = timeline.linkGroups?.find((group) => group.mode === 'sync-lock' && group.itemIds.includes(item.id));
+  const toggleRelationship = (mode: 'linked' | 'sync-lock') => {
+    const existing = mode === 'linked' ? linkedGroup : syncLockGroup;
+    const next = existing
+      ? unlinkItems(timeline, batchN > 1 ? batchIds : [item.id], mode)
+      : setLinkGroup(timeline, {
+          id: globalThis.crypto?.randomUUID?.() ?? `link_${Date.now().toString(36)}`,
+          itemIds: batchIds,
+          anchorItemId: item.id,
+          mode,
+        });
+    if (next !== timeline) commands.applyState(next);
+  };
 
   const runMulticam = async () => {
     if (!multicamReady || syncBusy) return;
     setSyncBusy(true);
-    setSyncMsg(t('正在做音频对齐…'));
+    setSyncMsg(t('正在读取时间码、采集时钟或音频…'));
     try {
       // Prefer right-clicked item as reference when it's in the set
       const refId = multicamIds.includes(item.id) ? item.id : undefined;
@@ -80,13 +107,16 @@ export function ClipContextMenu({ item, transitions, x, y, playhead, commands, t
         referenceItemId: refId,
       });
       if (result.changed && result.nextState) commands.applyState(result.nextState);
-      setSyncMsg(result.changed
+      const methods = [...new Set(result.offsets.map((offset) => offset.method))].join(' / ');
+      setSyncMsg(result.groupId
         ? (result.skippedItemIds.length
-          ? t('已同步 {n} 个片段，跳过 {m} 个', { n: result.syncedItemIds.length, m: result.skippedItemIds.length })
-          : t('已同步 {n} 个片段', { n: result.syncedItemIds.length }))
+          ? t('多机位组已保存（{method}），跳过 {m} 个', { method: methods, m: result.skippedItemIds.length })
+          : t('多机位组已保存（{method}）', { method: methods }))
         : result.status === 'already_synced'
           ? t('已经对齐（偏移小于 1 帧）')
-          : t('无法对齐所选片段（置信度过低或解码失败）'));
+          : result.status === 'failed'
+            ? result.message
+            : t('无法对齐所选片段（缺少时间码且音频置信度过低）'));
       if (result.changed) {
         // brief toast then close
         window.setTimeout(() => onClose(), 900);
@@ -143,8 +173,9 @@ export function ClipContextMenu({ item, transitions, x, y, playhead, commands, t
   const inside = playhead > item.startFrame && playhead < item.startFrame + item.durationInFrames;
   const isVisual = item.kind !== 'audio';
   const isDom = item.kind === 'motion-graphic' || item.kind === 'text'; // DOM clips → alpha MG export
-  const canSpeed = item.kind === 'video' || item.kind === 'audio'; // playbackRate only affects av
+  const canSpeed = item.kind === 'video' || item.kind === 'audio' || item.kind === 'sequence';
   const rate = item.playbackRate ?? 1;
+  const displayedRate = displaySpeedRate(rate);
   const reviewFrame = Math.max(item.startFrame, Math.min(playhead, item.startFrame + item.durationInFrames - 1));
   const run = (fn: () => void) => () => { fn(); onClose(); };
 
@@ -186,6 +217,26 @@ export function ClipContextMenu({ item, transitions, x, y, playhead, commands, t
           {multicamHint}
         </div>
       )}
+      {multicamGroup && (
+        <div style={{ padding: '0 9px 6px', fontSize: 10.5, color: theme.textDim, lineHeight: 1.3 }}>
+          {t('多机位组 · {n} 机位 · {method}', {
+            n: multicamGroup.angles.length,
+            method: multicamGroup.syncMethod,
+          })}
+        </div>
+      )}
+      <Item
+        label={linkedGroup ? t('取消链接音视频') : t('链接所选音视频')}
+        icon={linkedGroup ? 'unlock' : 'users'}
+        disabled={!linkedGroup && batchN < 2}
+        onClick={run(() => toggleRelationship('linked'))}
+      />
+      <Item
+        label={syncLockGroup ? t('取消同步锁定') : t('同步锁定所选片段')}
+        icon={syncLockGroup ? 'unlock' : 'lock'}
+        disabled={!syncLockGroup && batchN < 2}
+        onClick={run(() => toggleRelationship('sync-lock'))}
+      />
       <Sep />
       <Item label={t('复制')} icon="copy" shortcut="⌘C" onClick={run(() => commands.duplicateItem(item.id))} />
       <Item label={t('切分')} icon="scissors" shortcut="C" disabled={!inside} onClick={run(() => commands.splitItem(item.id, playhead))} />
@@ -206,18 +257,21 @@ export function ClipContextMenu({ item, transitions, x, y, playhead, commands, t
       )}
       <Item label={t('复制效果')} icon="sparkles" disabled={!isVisual} onClick={run(copyFx)} />
       <Item label={t('粘贴效果')} icon="clipboard" shortcut={PASTE_HINT} disabled={!isVisual || !fxClip} onClick={run(pasteFx)} />
-      <Item label={rate !== 1 ? t('变速（{rate}×）', { rate }) : t('变速')} icon="clock" chevron disabled={!canSpeed}
+      <Item label={!matchesSpeedPreset(rate, 1) ? t('变速（{rate}×）', { rate: displayedRate }) : t('变速')} icon="clock" chevron disabled={!canSpeed}
         onClick={canSpeed ? () => setShowSpeed((v) => !v) : undefined} />
       {showSpeed && canSpeed && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '2px 9px 6px 35px' }}>
-          {SPEED_PRESETS.map((s) => (
-            <button key={s} onClick={run(() => commands.setItemSpeed(item.id, s))}
-              style={{
-                cursor: 'pointer', fontSize: 11, padding: '3px 8px', borderRadius: 5,
-                border: `0.5px solid ${s === rate ? theme.accent : theme.border}`,
-                background: s === rate ? theme.accent : 'none', color: s === rate ? theme.onAccent : theme.text,
-              }}>{s}×</button>
-          ))}
+          {SPEED_PRESETS.map((s) => {
+            const active = matchesSpeedPreset(rate, s);
+            return (
+              <button key={s} onClick={run(() => commands.setItemSpeed(item.id, s))}
+                style={{
+                  cursor: 'pointer', fontSize: 11, padding: '3px 8px', borderRadius: 5,
+                  border: `0.5px solid ${active ? theme.accent : theme.border}`,
+                  background: active ? theme.accent : 'none', color: active ? theme.onAccent : theme.text,
+                }}>{s}×</button>
+            );
+          })}
         </div>
       )}
       <Sep />

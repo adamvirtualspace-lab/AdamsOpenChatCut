@@ -1,19 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { resolveAgentReferences, type AgentContext, type AgentReference } from './context';
-import { initialMessages, runAgent, type LLMMessage } from './runtime';
-import {
-  generateAgentText,
-  normalizeLlmProvider,
-  PROVIDER,
-  type LlmProvider,
-} from './client';
+import { resolveAgentReferences } from './context';
+import type { AgentContext, AgentReference } from './context';
+import type { AgentRuntimeModule, LLMMessage, RuntimeGuardRequest } from './runtime';
+import { normalizeLlmProvider, PROVIDER } from './providerConfig';
+import type { LlmProvider } from './providerConfig';
 import { normalizeLlmMessages, prepareMessagesForProvider } from './messages';
 import { makeDraft, replayActions } from '../editor/store';
 import { buildOperation, buildProposal, isProposalStale, partitionProposalActions, type Operation, type Proposal } from './proposal';
 import { isSkillAllowed, rememberSkillAllowed, type GuardDecision } from './skills/skillGuard';
-import type { GenerationGuardSkill } from './settings/agentSettings';
 import { loadChat, saveChat } from '../persist/projectStore';
 import { loadProposal, saveProposal, clearProposal } from '../persist/proposalStore';
+import { saveAutomaticVersion } from '../persist/versionStore';
+import { getLocale } from '../i18n/locale';
+import { getAgentModelSnapshot, isAgentModelReady } from './model-selection';
 import {
   appendAgentChange,
   canRollbackAgentChange,
@@ -33,9 +32,7 @@ export interface DisplayMessage {
 }
 
 /** Prepend skill_guard pending requests (rendered as cards waiting for user confirmation). */
-export interface PendingGuard {
-  skill: GenerationGuardSkill;
-  tool: string;
+export interface PendingGuard extends RuntimeGuardRequest {
   resolve: (d: GuardDecision) => void;
 }
 
@@ -44,6 +41,24 @@ export interface LiveTool {
   name: string;
   partial: string;
 }
+
+// Runtime boundary: the editor may mount the chat shell while it is collapsed.
+// A literal import keeps the Vite chunk statically discoverable without eagerly
+// evaluating the AI SDK, tool registry, or provider client.
+const importAgentRuntime = async (): Promise<AgentRuntimeModule> => import('./runtime');
+let agentRuntimePromise: Promise<AgentRuntimeModule> | null = null;
+
+export function preloadAgentRuntime(): Promise<AgentRuntimeModule> {
+  if (!agentRuntimePromise) {
+    agentRuntimePromise = importAgentRuntime().catch((error: unknown) => {
+      agentRuntimePromise = null;
+      throw error;
+    });
+  }
+  return agentRuntimePromise;
+}
+
+const initialMessages = (): LLMMessage[] => [];
 
 export function useAgent(ctx: AgentContext, projectId: string) {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
@@ -72,6 +87,7 @@ export function useAgent(ctx: AgentContext, projectId: string) {
   proposalRef.current = proposal;
   // in-flight turn's abort controller (aborted by the Stop button)
   const abortRef = useRef<AbortController | null>(null);
+  const applyingProposalRef = useRef(false);
 
   // hydrate chat + pending proposal on mount / project switch
   useEffect(() => {
@@ -128,7 +144,7 @@ export function useAgent(ctx: AgentContext, projectId: string) {
   const send = useCallback(
     async (text: string, opts?: { askOnly?: boolean; references?: AgentReference[] }) => {
       const trimmed = text.trim();
-      if (!trimmed || running || proposalRef.current) return; // resolve a pending proposal first
+      if (!trimmed || running || proposalRef.current || !isAgentModelReady(getAgentModelSnapshot())) return; // resolve a pending proposal and require a configured model
       setMessages((m) => [...m, { role: 'user', text: trimmed }]);
       const contextEntries = resolveAgentReferences(ctxRef.current, opts?.references ?? []);
       const content = contextEntries.length
@@ -165,12 +181,15 @@ export function useAgent(ctx: AgentContext, projectId: string) {
       const ops: Operation[] = [];
       const persistentOps: Operation[] = [];
       let persistentBeforeDoc: typeof baseDoc | null = null;
+      let persistentSnapshot = Promise.resolve();
+      let persistentSaveError: unknown;
       let proposalBaseDoc = baseDoc;
       let draftInvalidated = false;
       let assistantText = '';
       const ac = new AbortController();
       abortRef.current = ac;
       try {
+        const { runAgent } = await preloadAgentRuntime();
         llmRef.current = await runAgent(llmRef.current, draftCtx, (ev) => {
           if (ev.type === 'text-start') {
             setMessages((m) => {
@@ -203,13 +222,17 @@ export function useAgent(ctx: AgentContext, projectId: string) {
             const { persistent, proposed } = partitionProposalActions(actions);
             if (persistent.length) {
               const observed = ctxRef.current.getDoc();
-              persistentBeforeDoc ??= observed;
-              if (observed !== baseDoc && observed !== proposalBaseDoc) {
+              if (!persistentBeforeDoc) {
+                persistentBeforeDoc = observed;
+                persistentSnapshot = saveAutomaticVersion(projectId, 'Agent 修改前', observed).then(
+                  () => undefined,
+                  (error) => { persistentSaveError = error; },
+                );
+                if (observed !== baseDoc) draftInvalidated = true;
+              } else if (observed !== persistentBeforeDoc) {
                 draftInvalidated = true;
-                proposalBaseDoc = observed;
               }
               proposalBaseDoc = replayActions(proposalBaseDoc, persistent);
-              ctxRef.current.commands.applyDoc(proposalBaseDoc);
               persistentOps.push(buildOperation(ev.name, (ev.args ?? {}) as Record<string, unknown>, persistent));
             }
             if (proposed.length) ops.push(buildOperation(ev.name, (ev.args ?? {}) as Record<string, unknown>, proposed));
@@ -222,30 +245,49 @@ export function useAgent(ctx: AgentContext, projectId: string) {
           askOnly: opts?.askOnly,
           signal: ac.signal,
           // Pre-skill_guard: Authorization has been remembered and released directly; otherwise, the pending card will be hung up to wait for the user.
-          onSkillGuard: ({ skill, tool }) => {
-            if (isSkillAllowed(skill, projectId)) return Promise.resolve<GuardDecision>('allow-once');
+          onSkillGuard: (guard) => {
+            if (isSkillAllowed(guard.skill, projectId)) return Promise.resolve<GuardDecision>('allow-once');
             return new Promise<GuardDecision>((resolve) => {
               setPendingGuard({
-                skill,
-                tool,
-                resolve: (d) => {
+                ...guard,
+                resolve: (decision) => {
                   setPendingGuard(null);
-                  if (d === 'allow-scope') rememberSkillAllowed(skill, projectId);
-                  resolve(d);
+                  if (decision === 'allow-scope') rememberSkillAllowed(guard.skill, projectId);
+                  resolve(decision);
                 },
               });
             });
           },
         });
+        await persistentSnapshot;
+        if (persistentSaveError) {
+          setMessages((current) => [...current, {
+            role: 'error',
+            text: '无法创建修改前版本，Agent 改动未应用。请检查本地存储后重试。',
+          }]);
+          return;
+        }
         llmProviderRef.current = PROVIDER;
         if (persistentBeforeDoc && persistentOps.length) {
-          const afterDoc = ctxRef.current.getDoc();
+          const currentDoc = ctxRef.current.getDoc();
+          if (draftInvalidated || currentDoc !== persistentBeforeDoc) {
+            setMessages((current) => [...current, {
+              role: 'error',
+              text: '生成期间工程发生了其他修改；Agent 改动未应用，请重新发送请求。',
+            }]);
+            return;
+          }
+          const afterDoc = replayActions(
+            currentDoc,
+            persistentOps.flatMap((operation) => operation.actions),
+          );
+          ctxRef.current.commands.applyDoc(afterDoc);
           const session = createAgentChangeSession(
             assistantText,
             persistentOps,
             persistentBeforeDoc,
             afterDoc,
-            !draftInvalidated,
+            true,
           );
           setChangeLog((current) => appendAgentChange(current, session));
         }
@@ -279,9 +321,12 @@ export function useAgent(ctx: AgentContext, projectId: string) {
     const t = draft.trim();
     if (!t) return draft;
     try {
+      // The enhancer is another first-send boundary and must not make client.ts eager.
+      const { generateAgentText } = await import('./client');
+      const language = getLocale() === 'zh' ? 'Chinese' : 'English';
       const out = (await generateAgentText({
         maxOutputTokens: 400,
-        system: 'You improve prompts for a video-editing assistant. Rewrite the user\'s rough or conversational editing intent as one clear, specific, directly executable instruction in the user\'s language. Output only the rewritten instruction, with no explanation, quotation marks, or line breaks.',
+        system: `You improve rough or conversational video-editing requests into one clear, specific, directly executable instruction. Write the instruction in ${language}, matching the selected interface language. Output only the rewritten instruction without explanation, quotation marks, or line breaks.`,
         prompt: t,
       })).trim();
       return out || draft;
@@ -294,19 +339,36 @@ export function useAgent(ctx: AgentContext, projectId: string) {
   // rejected if the project changed after it was generated: replaying index- or
   // timeline-sensitive actions onto a different snapshot can silently edit the
   // wrong clip. Side effects stay outside React state updaters.
-  const doApply = useCallback((selected: Set<number>) => {
+  const doApply = useCallback(async (selected: Set<number>) => {
     const p = proposalRef.current;
     if (!p) return;
+    if (applyingProposalRef.current) return;
+    applyingProposalRef.current = true;
     const currentDoc = ctxRef.current.getDoc();
     const chosen = p.options[0].operations.filter((_, i) => selected.has(i));
     const result = replayActions(currentDoc, chosen.flatMap((o) => o.actions));
-    ctxRef.current.commands.applyDoc(result);
-    const session = createAgentChangeSession(p.summary, chosen, currentDoc, result);
-    setChangeLog((current) => appendAgentChange(current, session));
-    llmRef.current.push({ role: 'user', content: `（已应用提案：${chosen.length}/${p.options[0].operations.length} 项操作。）` });
-    setProposalStale(false);
-    setProposal(null);
-  }, []);
+    try {
+      await saveAutomaticVersion(projectId, 'Agent 修改前', currentDoc);
+      if (proposalRef.current !== p) return;
+      if (ctxRef.current.getDoc() !== currentDoc) {
+        setProposalStale(true);
+        return;
+      }
+      ctxRef.current.commands.applyDoc(result);
+      const session = createAgentChangeSession(p.summary, chosen, currentDoc, result);
+      setChangeLog((current) => appendAgentChange(current, session));
+      llmRef.current.push({ role: 'user', content: `（已应用提案：${chosen.length}/${p.options[0].operations.length} 项操作。）` });
+      setProposalStale(false);
+      setProposal(null);
+    } catch {
+      setMessages((current) => [...current, {
+        role: 'error',
+        text: '无法创建修改前版本，提案未应用。请检查本地存储后重试。',
+      }]);
+    } finally {
+      applyingProposalRef.current = false;
+    }
+  }, [projectId]);
 
   const applyProposal = useCallback((selected: Set<number>) => {
     const p = proposalRef.current;
@@ -316,11 +378,11 @@ export function useAgent(ctx: AgentContext, projectId: string) {
       setProposalStale(true);
       return;
     }
-    doApply(selected);
+    void doApply(selected);
   }, [doApply]);
 
   // "Apply anyway": Replay even though the snapshot has changed - index-sensitive operations may be misplaced and may be decided by the user.
-  const forceApplyProposal = useCallback((selected: Set<number>) => { doApply(selected); }, [doApply]);
+  const forceApplyProposal = useCallback((selected: Set<number>) => { void doApply(selected); }, [doApply]);
 
   // "Re-proposal": Discard the old card and ask the agent to re-promote the equivalent modification according to the current timeline.
   const reProposeStale = useCallback(() => {
@@ -357,10 +419,10 @@ export function useAgent(ctx: AgentContext, projectId: string) {
     void clearProposal(projectId);
   }, [running, projectId]);
 
-  const rollbackChangeSession = useCallback((id: string): boolean => {
+  const rollbackChangeSession = useCallback((id: string, force = false): boolean => {
     const session = changeLog.find((item) => item.id === id);
     if (!session) return false;
-    const previous = rollbackAgentChange(session, ctxRef.current.getDoc());
+    const previous = rollbackAgentChange(session, ctxRef.current.getDoc(), force);
     if (!previous) return false;
     ctxRef.current.commands.applyDoc(previous);
     return true;

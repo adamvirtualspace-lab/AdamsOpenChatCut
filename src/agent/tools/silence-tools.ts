@@ -1,47 +1,25 @@
+export { SILENCE_TOOL_SCHEMAS, SILENCE_TOOL_NAMES } from './schemas/silence-tools';
 // remove_silence - delete dead air (silent segment): native WebAudio analysis, no network connection.
 // Detected in src/audio/silence.ts (relative voice level + absolute lower limit + breathing port),
 // Edit in src/editor/silenceRebuild.ts(split/remove string batch, one step undo,
 // Co-orbital ripple closure). The word-level path for transcribing clip belongs to clean_script, which is a gatekeeper here.
-import type { AgentToolSchema } from '../tool-schema';
 import type { AgentContext } from '../context';
 import type { TimelineItem } from '../../editor/types';
 import type { Action } from '../../editor/reduce';
-import { analyzeClipSilence, SILENCE_DEFAULTS, type SilenceSpan } from '../../audio/silence';
+import { analyzeClipSilence, type SilenceSpan } from '../../audio/silence';
+import { sourceRevisionOf } from '../../editor/mediaSourceRevision';
+import { vadSilenceRemovalEnabled } from '../../audio/vad';
 import { planSilenceRemoval, silenceRemovalBlocker, spansToLocalCuts } from '../../editor/silenceRebuild';
 
 type Args = Record<string, unknown>;
 
-export const SILENCE_TOOL_SCHEMAS: AgentToolSchema[] = [
-  {
-    name: 'remove_silence',
-    description: [
-      'Remove dead air — quiet, speech-free stretches — from clips, ripple-closing each gap on its own track (ONE undoable batch).',
-      'Detection is on-device and relative: a stretch counts as silence only when its level sits well below the clip\'s own speech level',
-      '(so music beds and loud ambience are never cut), it lasts at least minSilenceMs, and a padMs breathing room is kept on both sides.',
-      'Use this to tighten pacing (long pauses, dead space between takes). It complements word-level editing:',
-      'transcribed clips that already have word edits or gap caps are skipped — use clean_script there, it trims pauses word-precisely.',
-      'Clips with playbackRate≠1 or an animated zoom are skipped (reported in skipped[]). Ripple is per-track: other tracks do not shift.',
-      'Call once with NO itemId to sweep every audio/video clip on the active timeline; pass itemId for a single clip.',
-      'Pass dryRun:true to preview the cut list (seconds) without editing.',
-    ].join(' '),
-    input_schema: {
-      type: 'object',
-      properties: {
-        itemId: { type: 'string', description: 'Only this clip (prefix id ok). Omit to process every audio/video clip.' },
-        thresholdDb: { type: 'number', minimum: -60, maximum: -6, description: `Silence gate relative to the clip's speech level in dB (default ${SILENCE_DEFAULTS.thresholdDb}; more negative = more conservative).` },
-        minSilenceMs: { type: 'number', minimum: 200, maximum: 10000, description: `Only remove pauses at least this long (default ${SILENCE_DEFAULTS.minSilenceMs}ms).` },
-        padMs: { type: 'number', minimum: 0, maximum: 1000, description: `Breathing room kept on each side of a cut (default ${SILENCE_DEFAULTS.padMs}ms).` },
-        dryRun: { type: 'boolean', description: 'true = report the would-be cuts without editing.' },
-      },
-    },
-  },
-];
+type SilenceTargetItem = TimelineItem & { kind: 'video' | 'audio' };
 
-export const SILENCE_TOOL_NAMES = new Set(SILENCE_TOOL_SCHEMAS.map((t) => t.name));
-
-function targetItems(ctx: AgentContext, itemId: unknown): TimelineItem[] | { error: string } {
-  const clips = ctx.getState().items.filter((it) => it.kind === 'video' || it.kind === 'audio');
-  const q = itemId === undefined || itemId === null ? '' : String(itemId);
+function targetItems(ctx: AgentContext, itemId: unknown): SilenceTargetItem[] | { error: string } {
+  const q = typeof itemId === 'string' ? itemId.trim() : '';
+  const clips = ctx.getState().items.filter(
+    (item): item is SilenceTargetItem => item.kind === 'video' || item.kind === 'audio',
+  );
   if (!q) return clips;
   const match = clips.find((it) => it.id === q || it.id.startsWith(q));
   return match ? [match] : { error: `no audio/video clip ${q}` };
@@ -49,6 +27,13 @@ function targetItems(ctx: AgentContext, itemId: unknown): TimelineItem[] | { err
 
 export async function execSilenceTool(name: string, args: Args, ctx: AgentContext): Promise<unknown> {
   if (name !== 'remove_silence') return { error: `unknown tool ${name}` };
+  if (!vadSilenceRemovalEnabled()) {
+    return {
+      ok: true,
+      edited: [],
+      note: 'VAD 静音删除功能未启用；为避免把音乐、噪声或低声讲话当静音，未执行删除。',
+    };
+  }
   const params = {
     thresholdDb: typeof args.thresholdDb === 'number' ? args.thresholdDb : undefined,
     minSilenceMs: typeof args.minSilenceMs === 'number' ? args.minSilenceMs : undefined,
@@ -63,6 +48,9 @@ export async function execSilenceTool(name: string, args: Args, ctx: AgentContex
   const edited: Array<{ itemId: string; removedSec: number; cuts: Array<{ fromSec: number; toSec: number }> }> = [];
   const allActions: Action[] = [];
   const spanCache = new Map<string, Promise<SilenceSpan[]>>();
+  const assetsBySrc = new Map((ctx.getDoc().assets ?? [])
+    .filter((asset) => !!asset.src)
+    .map((asset) => [asset.src, asset]));
   /** The number of frames deleted from the previous clip on the same track → Shift left by this amount before planning subsequent clips.*/
   const trackShift = new Map<string, number>();
 
@@ -74,8 +62,23 @@ export async function execSilenceTool(name: string, args: Args, ctx: AgentContex
       continue;
     }
     try {
-      if (!spanCache.has(item.src!)) spanCache.set(item.src!, analyzeClipSilence(item.src!, params));
-      const spans = await spanCache.get(item.src!)!;
+      const asset = assetsBySrc.get(item.src!);
+      const sourceRevision = sourceRevisionOf(asset ?? {
+        src: item.src!,
+        name: item.name,
+        kind: item.kind,
+        sourceRevision: item.sourceRevision,
+        durationInFrames: item.durationInFrames,
+      });
+      const cacheKey = `${item.src!}:${sourceRevision}`;
+      if (!spanCache.has(cacheKey)) {
+        spanCache.set(cacheKey, analyzeClipSilence(item.src!, params, {
+          assetId: asset?.id ?? item.id,
+          sourceRevision,
+          featureEnabled: true,
+        }));
+      }
+      const spans = await spanCache.get(cacheKey)!;
       const cuts = spansToLocalCuts(item, spans, fps);
       if (!cuts.length) continue;
       const shifted = { ...item, startFrame: item.startFrame - (trackShift.get(item.track) ?? 0) };

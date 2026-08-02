@@ -1,20 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { theme } from '../../theme';
 import { useT } from '../../i18n/locale';
 import type { AgentContext } from '../../agent/context';
 import type { MediaAsset, TimelineState } from '../../editor/types';
 import { kindOf } from '../../media/upload';
-import { useAgent } from '../../agent/useAgent';
+import { preloadAgentRuntime, useAgent } from '../../agent/useAgent';
 import { useExternalAgentBridge } from '../../agent/useExternalAgentBridge';
 import { ExternalProposalCard } from './ExternalProposalCard';
 import { thinkingPhrase } from './thinkingPhrases';
 import { onSelectionRef, refPromptToken, setSelectionRefMode } from '../../agent/selection-refs';
 import { shouldBlockAutoApply } from '../../agent/skills/skillGuard';
+import { getAgentModelSnapshot, isAgentModelReady } from '../../agent/model-selection';
 import { ProposalCard } from './ProposalCard';
 import { ChatMessage } from './ChatMessage';
 import { ToolGroupRow } from './ToolGroupRow';
 import { groupMessages } from './message-groups';
 import { ChatComposer, type ChatMode, type RefItem } from './ChatComposer';
+import { AgentChangeLogMenu } from './AgentChangeLogMenu';
 import { BrandMark, Icon, OpenChatCutWordmark } from '../icons';
 import {
   clearComposerDraft,
@@ -79,11 +82,14 @@ function ElapsedTimer() {
   );
 }
 
-// Chinese name of the skill on the front skill_guard card (3 generated skills affected by gate)
 const GUARD_SKILL_LABELS = {
   'image-gen': '图像生成',
   'motion-graphic-gen': 'MG 动画生成',
   'video-gen': '视频生成',
+  'audio-gen': '音频 / 音乐生成',
+  'gpu-operation': '长时 GPU 任务',
+  'irreversible-export': '不可逆导出',
+  'high-cost-operation': '高成本 / 长时或不可逆操作',
 } as const;
 
 export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPreviewState, seed, creativeMode, onCreativeModeChange, onImportMedia }: ChatPanelProps) {
@@ -93,6 +99,9 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
     proposalStale, forceApplyProposal, reProposeStale, pendingGuard, liveTool,
     changeLog, rollbackChangeSession, canRollbackChangeSession,
   } = useAgent(ctx, projectId);
+  useEffect(() => {
+    if (!collapsed) void preloadAgentRuntime().catch(() => undefined);
+  }, [collapsed]);
   const externalProposal = useExternalAgentBridge(ctx, projectId);
   const [input, setInput] = useState('');
   const [mode, setMode] = useState<ChatMode>('agent');
@@ -100,6 +109,10 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
   const [enhancing, setEnhancing] = useState(false);
   const [selectedRefs, setSelectedRefs] = useState<RefItem[]>([]);
   const [visibleMessageCount, setVisibleMessageCount] = useState(MESSAGE_WINDOW_SIZE);
+  const [changeLogSlot, setChangeLogSlot] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setChangeLogSlot(document.getElementById('cc-agent-change-log-slot'));
+  }, []);
   // Restore composer draft / mode when switching projects (session continuity).
   useEffect(() => {
     setInput(loadComposerDraft(projectId));
@@ -165,14 +178,16 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
   }, [proposal, autoApply, applyProposal]);
 
   const submit = () => {
-    if (!input.trim() || running) return;
+    const modelReady = isAgentModelReady(getAgentModelSnapshot());
+    if (!input.trim() || running || !modelReady) return;
     send(input, { askOnly: mode === 'ask', references: selectedRefs });
     setInput('');
     setSelectedRefs([]);
     clearComposerDraft(projectId);
   };
   const runEnhance = async () => {
-    if (!input.trim() || enhancing || running) return;
+    const modelReady = isAgentModelReady(getAgentModelSnapshot());
+    if (!input.trim() || enhancing || running || !modelReady) return;
     setEnhancing(true);
     try { const improved = await enhance(input); setInput(improved); taRef.current?.focus(); }
     finally { setEnhancing(false); }
@@ -225,17 +240,32 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
     }
   };
 
+  const changeLogMenu = changeLogSlot && createPortal(
+    <AgentChangeLogMenu
+      changeLog={changeLog}
+      running={running}
+      canRollback={canRollbackChangeSession}
+      onRollback={rollbackChangeSession}
+    />,
+    changeLogSlot,
+  );
+
   if (collapsed) {
     return (
-      <aside style={{ gridColumn: 1, gridRow: '2 / 5', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '10px 0', borderRight: `0.5px solid ${theme.border}`, background: theme.panel }}>
-        <button onClick={onToggleCollapse} title={t('展开 OpenChatCut Agent')} style={{ background: 'none', border: 'none', color: theme.textDim, cursor: 'pointer', fontSize: 14 }}><span style={{ transform: 'rotate(-90deg)', display: 'inline-flex' }}><Icon name="chevronDown" size={14} /></span></button>
-        <div className="cc-chat-collapsed-brand">OpenChatCut</div>
-      </aside>
+      <>
+        {changeLogMenu}
+        <aside className="cc-chat-panel collapsed" style={{ gridColumn: 1, gridRow: '2 / 5', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '10px 0', borderRight: `0.5px solid ${theme.border}`, background: theme.panel }}>
+          <button onClick={onToggleCollapse} title={t('展开 OpenChatCut Agent')} style={{ background: 'none', border: 'none', color: theme.textDim, cursor: 'pointer', fontSize: 14 }}><span style={{ transform: 'rotate(-90deg)', display: 'inline-flex' }}><Icon name="chevronDown" size={14} /></span></button>
+          <div className="cc-chat-collapsed-brand">OpenChatCut</div>
+        </aside>
+      </>
     );
   }
 
   return (
-    <aside style={{ gridColumn: 1, gridRow: '2 / 5', display: 'flex', flexDirection: 'column', borderRight: `0.5px solid ${theme.border}`, background: theme.panel, minHeight: 0, minWidth: 0 }}>
+    <>
+      {changeLogMenu}
+      <aside className="cc-chat-panel" style={{ gridColumn: 1, gridRow: '2 / 5', display: 'flex', flexDirection: 'column', borderRight: `0.5px solid ${theme.border}`, background: theme.panel, minHeight: 0, minWidth: 0 }}>
       <div className="cc-chat-header">
         <div className="cc-chat-brand">
           <BrandMark size={20} />
@@ -252,38 +282,6 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
         )}
         <button onClick={onToggleCollapse} title={t('收起 OpenChatCut Agent')} style={{ background: 'none', border: 'none', color: theme.textDim, cursor: 'pointer', fontSize: 13 }}><span style={{ transform: 'rotate(90deg)', display: 'inline-flex' }}><Icon name="chevronDown" size={14} /></span></button>
       </div>
-
-      {changeLog.length > 0 && (
-        <details style={{ borderBottom: `0.5px solid ${theme.border}`, padding: '7px 12px', fontSize: 12 }}>
-          <summary style={{ cursor: 'pointer', color: theme.textDim }}>
-            {t('Agent 修改记录')}（{changeLog.length}）
-          </summary>
-          <div style={{ display: 'grid', gap: 8, maxHeight: 180, overflow: 'auto', paddingTop: 8 }}>
-            {[...changeLog].reverse().map((session) => {
-              const canRollback = !running && canRollbackChangeSession(session.id);
-              return (
-                <div key={session.id} style={{ border: `0.5px solid ${theme.border}`, borderRadius: 6, padding: 8 }}>
-                  <div style={{ color: theme.text, lineHeight: 1.4 }}>{session.summary}</div>
-                  <div style={{ color: theme.textDim, fontSize: 11, marginTop: 2 }}>
-                    {new Date(session.createdAt).toLocaleString()} · {session.operations.length} {t('项操作')}
-                  </div>
-                  {session.operations.map((operation, index) => (
-                    <div key={`${session.id}:${index}`} style={{ color: theme.textDim, marginTop: 4 }}>
-                      {operation.action} · {operation.target} · {operation.impact}
-                    </div>
-                  ))}
-                  <button type="button" disabled={!canRollback}
-                    title={canRollback ? t('恢复到这次 Agent 修改前') : t('工程后来已有其他修改')}
-                    onClick={() => rollbackChangeSession(session.id)}
-                    style={{ marginTop: 7, border: `0.5px solid ${theme.border}`, borderRadius: 5, padding: '4px 8px', background: 'transparent', color: canRollback ? theme.text : theme.textDim, cursor: canRollback ? 'pointer' : 'default', opacity: canRollback ? 1 : 0.5 }}>
-                    {t('回滚此会话')}
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        </details>
-      )}
 
       {/* messages */}
       <div ref={scrollRef} className={`cc-chat-messages${messages.length === 0 ? ' empty' : ''}`}>
@@ -361,8 +359,18 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
         {pendingGuard && (
           <div style={{ margin: '10px 0', padding: '10px 12px', border: `0.5px solid ${theme.border}`, borderRadius: 4, background: theme.panelAlt }}>
             <div style={{ fontSize: 12.5, color: theme.text, marginBottom: 8, lineHeight: 1.5 }}>
-              {t('AI 请求运行生成技能：{name}', { name: t(GUARD_SKILL_LABELS[pendingGuard.skill]) })}
-              <span style={{ color: theme.textDim }}>（{pendingGuard.tool}）</span>
+              {t('AI 请求执行需确认操作：{name}', { name: t(GUARD_SKILL_LABELS[pendingGuard.skill]) })}
+              <span style={{ color: theme.textDim }}>（{pendingGuard.requestedTool ?? pendingGuard.tool}）</span>
+              {pendingGuard.operationId && (
+                <div style={{ marginTop: 5, color: theme.textDim, fontFamily: 'ui-monospace, SFMono-Regular, monospace', fontSize: 11 }}>
+                  {t('原任务')} {pendingGuard.operationId}
+                </div>
+              )}
+              {pendingGuard.summary && (
+                <div style={{ marginTop: 5, color: theme.textDim, fontSize: 11.5, overflowWrap: 'anywhere' }}>
+                  {pendingGuard.summary}
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               <button type="button" onClick={() => pendingGuard.resolve('allow-once')}
@@ -413,6 +421,7 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
           taRef={taRef}
           placeholder={messages.length === 0 ? t('描述你想要创建的内容...') : t('告诉 AI 要做哪些修改 - @ 引用素材')} />
       </div>
-    </aside>
+      </aside>
+    </>
   );
 }

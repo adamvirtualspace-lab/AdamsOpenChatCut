@@ -196,6 +196,17 @@ export const GENERATE_TOOL_SCHEMAS: AgentToolSchema[] = [
     },
   },
   {
+    name: 'rerun_generation',
+    description: 'Explicitly rerun one previously tracked generation operation with its complete original submit args. Exact operation/job IDs win; a prefix is accepted only when unique. Legacy summary-only rows and ambiguous prefixes are rejected before any provider call.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        jobId: { type: 'string', minLength: 1, description: 'Exact operation/job ID or a unique prefix. Ambiguous prefixes are rejected with distinguishable candidate IDs.' },
+      },
+      required: ['jobId'],
+    },
+  },
+  {
     name: 'submit_export',
     description: [
       'Export the active timeline synchronously as MP4/WebM video, MP3/WAV audio, SRT/TXT subtitles,',
@@ -227,6 +238,12 @@ export const GENERATE_TOOL_SCHEMAS: AgentToolSchema[] = [
           enum: ['480p', '720p', '1080p'],
           description: 'Video max-height ladder (default timeline size). Scales width to keep aspect.',
         },
+        videoBitrate: {
+          type: 'integer',
+          minimum: 1_000_000,
+          maximum: 80_000_000,
+          description: 'Video only. Exact output bitrate in bits per second; omit for the renderer default.',
+        },
         timelineId: {
           type: 'string',
           description: 'Export a non-active timeline by id/prefix without switching (video/audio/xml).',
@@ -248,3 +265,5 @@ export const GENERATE_TOOL_SCHEMAS: AgentToolSchema[] = [
     },
   },
 ];
+
+export const GENERATE_TOOL_NAMES = new Set(GENERATE_TOOL_SCHEMAS.map((tool) => tool.name));

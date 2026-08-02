@@ -1,6 +1,10 @@
 import type { AgentToolSchema } from './tool-schema';
 import { TOOL_SCHEMAS } from './tools';
-import { isExternalDraftTool, isExternalReadTool } from './external-tool-policy';
+import {
+  isExternalDraftTool,
+  isExternalGlobalReadTool,
+  isExternalReadTool,
+} from './external-tool-policy';
 
 interface ExternalToolAnnotation {
   readOnlyHint?: boolean;
@@ -37,7 +41,7 @@ const SESSION_TOOLS: ExternalRegisteredTool[] = [
   },
   {
     name: 'get_edit_session',
-    description: 'Read draft/review/apply status. Manual sessions wait for approval; auto sessions apply during review_edit_session.',
+    description: 'Read session status: drafting/awaiting_review or terminal applied/rejected/cancelled/stale/failed.',
     input_schema: {
       type: 'object',
       properties: { editSessionId: SESSION_ID_PROPERTY },
@@ -60,7 +64,7 @@ const SESSION_TOOLS: ExternalRegisteredTool[] = [
   },
   {
     name: 'discard_edit_session',
-    description: 'Discard a draft or pending review without changing the live OpenChatCut project.',
+    description: 'Cancel a draft or pending review without changing the live OpenChatCut project.',
     input_schema: {
       type: 'object',
       properties: { editSessionId: SESSION_ID_PROPERTY },
@@ -74,8 +78,20 @@ function requiredWithSession(required: string[] | undefined): string[] {
   return [...new Set([...(required ?? []), 'editSessionId'])];
 }
 
-/** MCP-facing catalog: lifecycle controls plus session-bound editor tools. */
+
+/** MCP-facing catalog: stateless reads, lifecycle controls, then session-bound editor tools. */
 export function externalToolSchemas(): ExternalRegisteredTool[] {
+  const globalReadTools = TOOL_SCHEMAS
+    .filter((tool) => isExternalGlobalReadTool(tool.name))
+    .map((tool): ExternalRegisteredTool => ({
+      ...tool,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    }));
   const editorTools = TOOL_SCHEMAS.filter((tool) => isExternalDraftTool(tool.name)).map((tool): ExternalRegisteredTool => ({
     ...tool,
     description: `${tool.description ?? tool.name} ${isExternalReadTool(tool.name) ? 'Reads' : 'Edits'} the edit-session draft; pass editSessionId.`,
@@ -91,5 +107,5 @@ export function externalToolSchemas(): ExternalRegisteredTool[] {
       openWorldHint: false,
     },
   }));
-  return [...SESSION_TOOLS, ...editorTools];
+  return [...globalReadTools, ...SESSION_TOOLS, ...editorTools];
 }

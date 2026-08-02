@@ -228,4 +228,8 @@ export default {
   '−{n} 片段': '−{n} clip(s)',
   '{n} 处改动': '{n} change(s)',
   '无变化': 'No changes',
+  '更多工具': 'More tools',
+  '选择引用': 'Select reference',
+  '工程后来已有其他修改，回滚前会再次确认': 'The project has newer edits. You will be asked to confirm before rollback.',
+  '工程后来已有其他修改，继续回滚会覆盖后续修改。确定继续吗？': 'The project has newer edits. Rolling back will overwrite them. Continue?',
 } as Record<string, string>;

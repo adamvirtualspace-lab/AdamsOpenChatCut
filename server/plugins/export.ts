@@ -4,39 +4,62 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { readFile, unlink, mkdir, rename, stat } from 'node:fs/promises';
-import { normalizeFrameRange } from '../../src/export/range.ts';
-import { resolveH264TargetBitrate } from '../media-acceleration.ts';
 import {
-  EXPORT_MEDIA,
-  exportDuration,
-  exportFilename,
-  exportScale,
-  planExport,
-  validateVideoParams,
+  resolveH264RenderOptions,
+  resolveH264TargetBitrate,
+  type H264EncoderOutcome,
+} from '../media-acceleration.ts';
+import { ffmpegBin } from '../media-binaries.ts';
+import {
   type ExportPlan,
   type ExportRequest,
-  type ExportTimeline,
 } from './export-plan.ts';
+import { isSequenceGraphError } from '../../src/editor/sequenceGraph.ts';
+import { acceptExportSubmission, type AcceptedExportSubmission } from './export-submission.ts';
+import {
+  createExportFailure,
+  exportFailureFrom,
+  ExportFailureError,
+  isExportFailure,
+  type ExportCleanupStatus,
+  type ExportFailure,
+  type ExportFailureStage,
+} from '../../src/export/exportFailure.ts';
 import {
   acquireExportPermit,
+  cancelActiveExportJob,
   cleanupStaleExportFiles,
+  createRenderProgress,
   EXPORT_JOB_RETENTION_MS,
   exportJobFilename,
+  exportJobResultName,
+  finalH264EncoderOutcome,
   exportOutputSize,
+  forgetExportJobController,
   retimeFps,
   unlinkWithRetry,
+  trackExportJobController,
   withExportPermit,
 } from './export-runtime.ts';
 import {
   createGenerationJob,
   deleteGenerationJob,
   getGenerationJobSnapshot,
+  registerGenerationCleanupPolicy,
   type UpdateGenerationJob,
 } from './generation-jobs.ts';
 // @ts-expect-error — plain .mjs render pipeline has no .d.ts
-import { renderTimeline, renderTimelineStills, renderClip, setUploadsDirProvider } from '../../remotion/render.mjs';
+import * as remotionRender from '../../remotion/render.mjs';
+const {
+  currentRenderConcurrency,
+  remotionFfmpegPath,
+  renderTimeline,
+  renderTimelineStills,
+  renderClip,
+  setUploadsDirProvider,
+} = remotionRender;
 
-import { uploadDir } from '../media-dir.ts';
+import { resolveUploadFile, uploadDir } from '../media-dir.ts';
 import { sanitizeFileName } from '../file-name.ts';
 import { formatFrameLabel, tileContactSheet } from '../frame-grid.ts';
 
@@ -89,59 +112,128 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(body));
 }
+function sendSequenceGraphFailure(res: ServerResponse, error: unknown): boolean {
+  if (!isSequenceGraphError(error)) return false;
+  sendJson(res, 422, {
+    error: error.message,
+    code: error.code,
+    path: error.path,
+    limit: error.limit,
+    itemId: error.itemId,
+    timelineId: error.timelineId,
+    referencedTimelineId: error.referencedTimelineId,
+    parentFps: error.parentFps,
+    childFps: error.childFps,
+  });
+  return true;
+}
+
+
+function sendExportFailure(res: ServerResponse, status: number, failure: ExportFailure): void {
+  sendJson(res, status, { error: failure.message, failure });
+}
+
+async function cleanupExportOutputs(paths: Array<string | null>): Promise<ExportCleanupStatus> {
+  let cleanupStatus: ExportCleanupStatus = 'succeeded';
+  await Promise.all(paths.filter((path): path is string => path !== null).map(async (path) => {
+    try {
+      await unlink(path);
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) cleanupStatus = 'failed';
+    }
+  }));
+  return cleanupStatus;
+}
+
+async function h264RenderOptions(codec: string) {
+  return codec === 'h264'
+    ? resolveH264RenderOptions(ffmpegBin(), remotionFfmpegPath())
+    : {};
+}
 
 async function renderExportPlan(
   plan: ExportPlan,
   filepath: string,
   update: UpdateGenerationJob,
-): Promise<void> {
+  signal?: AbortSignal,
+): Promise<H264EncoderOutcome | undefined> {
   const retimed = plan.retimeFps ? `${filepath}.retimed.${plan.media.ext}` : null;
+  let failureStage: ExportFailureStage = 'render';
   try {
     update({ phase: 'preparing', progress: 4, processedFrames: 0, totalFrames: plan.totalFrames });
     await mkdir(dirname(filepath), { recursive: true });
     update({ phase: 'rendering', progress: 8 });
-    const renderSpan = plan.retimeFps ? 84 : 90;
-    await renderTimeline({
+    const rendered = await renderTimeline({
       state: plan.state,
+      project: plan.project,
+      timelineId: plan.timelineId,
       outputLocation: filepath,
       codec: plan.media.codec,
       frameRange: plan.frameRange,
       scale: plan.scale,
-      onProgress: (value: number) => {
-        const normalized = Math.min(1, Math.max(0, Number(value) || 0));
-        update({
-          phase: 'rendering',
-          progress: 8 + normalized * renderSpan,
-          processedFrames: Math.min(plan.totalFrames, Math.floor(normalized * plan.totalFrames)),
-          totalFrames: plan.totalFrames,
-        });
-      },
-    });
+      videoBitrate: plan.videoBitrate,
+      ...await h264RenderOptions(plan.media.codec),
+      onProgress: createRenderProgress(update, plan.totalFrames, plan.retimeFps ? 84 : 90),
+      signal,
+    }) as Partial<H264EncoderOutcome>;
+    let outcome = rendered.encoder ? { encoder: rendered.encoder, ...(rendered.encoderFallbackReason ? { encoderFallbackReason: rendered.encoderFallbackReason } : {}) } : undefined;
     if (retimed && plan.retimeFps) {
+      failureStage = 'encode';
       update({ phase: 'finalizing', progress: 93, processedFrames: plan.totalFrames });
       const outputSize = exportOutputSize(plan.state, plan.scale);
-      await retimeFps(filepath, retimed, plan.retimeFps, plan.media.codec as 'h264' | 'vp8',
-        resolveH264TargetBitrate({ ...outputSize, fps: plan.retimeFps }));
+      outcome = finalH264EncoderOutcome(outcome, await retimeFps(
+        filepath,
+        retimed,
+        plan.retimeFps,
+        plan.media.codec as 'h264' | 'vp8',
+        plan.videoBitrate ?? resolveH264TargetBitrate({ ...outputSize, fps: plan.retimeFps }),
+        signal,
+      ));
       await unlink(filepath).catch(() => {});
       await rename(retimed, filepath);
     }
     update({ phase: 'finalizing', progress: 99, processedFrames: plan.totalFrames });
+    return outcome;
   } catch (error) {
-    await Promise.all([unlink(filepath).catch(() => {}), retimed ? unlink(retimed).catch(() => {}) : Promise.resolve()]);
-    throw error;
+    const cleanupStatus = await cleanupExportOutputs([filepath, retimed]);
+    const existing = exportFailureFrom(error);
+    if (existing) {
+      throw new ExportFailureError({ ...existing, cleanupStatus, targetPath: filepath });
+    }
+    const aborted = signal?.aborted === true;
+    const timedOut = error instanceof Error && /(?:timed?\\s*out|timeout)/i.test(error.message);
+    throw new ExportFailureError(createExportFailure({
+      stage: aborted ? 'cancel' : timedOut ? 'timeout' : failureStage,
+      code: aborted ? 'export_cancelled' : timedOut ? 'export_timeout'
+        : failureStage === 'encode' ? 'export_encode_failed' : 'export_render_failed',
+      retryable: !aborted,
+      cleanupStatus,
+      targetPath: filepath,
+      message: error instanceof Error ? error.message : String(error),
+    }));
   }
 }
 
-/**
- * Dev-server plugin exposing `POST /export`: body `{ state, format?, ... }` →
- * rendered MP4/WebM/MP3/WAV. Same pipeline as the CLI export —
- * the timeline is rendered in headless Chrome.
- */
+function isExportCapabilitiesPath(url: string | undefined): boolean {
+  const path = (url ?? '').split('?')[0].replace(/\/+$/, '');
+  return path === '/capabilities' || path === '/export/capabilities';
+}
+
+async function exportCapabilities() {
+  const { h264Profile } = await resolveH264RenderOptions(ffmpegBin(), remotionFfmpegPath());
+  return { h264: h264Profile, renderConcurrency: currentRenderConcurrency() };
+}
+
 export function exportPlugin(): Plugin {
+  registerGenerationCleanupPolicy('server-export', async (result) => {
+    const name = exportJobResultName(result.path, result.assetId);
+    if (!name) throw new Error(`refusing to clean invalid server export result ${result.path}`);
+    const file = resolveUploadFile(name);
+    if (file) await unlinkWithRetry(file);
+  });
   return {
     name: 'openchatcut-export',
     configureServer(server) {
-      // The /media/uploads symlink of the rendering bundle follows MEDIA_DIR (customized asset directories can also be rendered)
       setUploadsDirProvider(uploadDir);
       const cleanStaleExports = () => cleanupStaleExportFiles(uploadDir(), {
           onError: (path, error) => server.config.logger.warn(
@@ -166,27 +258,45 @@ export function exportPlugin(): Plugin {
           sendError(res, 405, 'method not allowed — use POST');
           return;
         }
+        let cleanupRenderMedia: (() => Promise<void>) | undefined;
         try {
           const body = (await readJsonBody(req)) as {
             state?: unknown;
+            project?: unknown;
+            timelineId?: unknown;
             frames?: unknown;
             grid?: boolean;
             fps?: number;
           } | null;
-          const state = body?.state;
           const frames = body?.frames;
-          if (!state || typeof state !== 'object' || !Array.isArray((state as { items?: unknown }).items)) {
-            sendError(res, 400, 'body must be { state, frames[] }');
-            return;
-          }
-          if (!Array.isArray(frames) || !frames.length || !frames.every((f) => typeof f === 'number')) {
+          if (!Array.isArray(frames) || !frames.length || !frames.every((frame) => typeof frame === 'number')) {
             sendError(res, 400, 'frames must be a non-empty number[]');
             return;
           }
-          const rendered = await renderTimelineStills({ state, frames }) as Array<{ frame: number; base64: string }>;
-          const fps = typeof body?.fps === 'number' && body.fps > 0
-            ? body.fps
-            : Number((state as { fps?: unknown }).fps) || 30;
+          let plan: ExportPlan;
+          try {
+            const accepted = await acceptExportSubmission({
+              state: body?.state,
+              project: body?.project,
+              timelineId: body?.timelineId,
+            });
+            plan = accepted.plan;
+            cleanupRenderMedia = accepted.cleanup;
+          } catch (error) {
+            if (!sendSequenceGraphFailure(res, error)) {
+              const failure = exportFailureFrom(error);
+              if (failure) sendExportFailure(res, failure.stage === 'preflight' ? 422 : 500, failure);
+              else sendError(res, 400, error instanceof Error ? error.message : String(error));
+            }
+            return;
+          }
+          const rendered = await renderTimelineStills({
+            state: plan.state,
+            project: plan.project,
+            timelineId: plan.timelineId,
+            frames,
+          }) as Array<{ frame: number; base64: string }>;
+          const fps = typeof body?.fps === 'number' && body.fps > 0 ? body.fps : plan.state.fps;
           const wantGrid = body?.grid !== false && rendered.length >= 2;
           let gridBase64: string | undefined;
           if (wantGrid) {
@@ -217,22 +327,25 @@ export function exportPlugin(): Plugin {
           server.config.logger.error(`[render-still] ${message}`);
           if (!res.headersSent) sendError(res, 500, message);
           else res.end();
+        } finally {
+          await cleanupRenderMedia?.();
         }
       });
-      // POST /render-clip { state (single-clip), codec, transparent, mode } →
-      //   mode 'download' streams the rendered file (Export MG animation: ProRes 4444 alpha);
-      //   mode 'bake' saves it under uploads and returns { path } (to video).
       server.middlewares.use('/render-clip', async (req, res) => {
         if (req.method !== 'POST') { sendError(res, 405, 'method not allowed — use POST'); return; }
         let tmpOut: string | null = null;
         let bakeOut: string | null = null;
+        let cleanupRenderMedia: (() => Promise<void>) | undefined;
         try {
           const body = (await readJsonBody(req)) as { state?: unknown; codec?: string; transparent?: boolean; mode?: string; filename?: string } | null;
           const state = body?.state;
-          if (!state || typeof state !== 'object' || !Array.isArray((state as { items?: unknown }).items)) {
+          if (!state || typeof state !== 'object' || !('items' in state) || !Array.isArray(state.items)) {
             sendError(res, 400, 'body must be { state, codec, mode }'); return;
           }
           const codec = typeof body?.codec === 'string' && body.codec in CLIP_EXT ? body.codec : 'h264';
+          const accepted = await acceptExportSubmission({ state });
+          cleanupRenderMedia = accepted.cleanup;
+          const renderState = accepted.plan.state;
           const ext = CLIP_EXT[codec];
           const mode = body?.mode === 'bake' ? 'bake' : 'download';
           const transparent = body?.transparent ?? codec === 'prores';
@@ -241,14 +354,26 @@ export function exportPlugin(): Plugin {
             await mkdir(dir, { recursive: true });
             const fname = `${randomUUID()}.${ext}`;
             bakeOut = join(dir, fname);
-            await withExportPermit(() => renderClip({ state, outputLocation: bakeOut, codec, transparent }));
+            await withExportPermit(async () => renderClip({
+              state: renderState,
+              outputLocation: bakeOut,
+              codec,
+              transparent,
+              ...await h264RenderOptions(codec),
+            }));
             bakeOut = null;
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ path: `/media/uploads/${fname}` }));
           } else {
             tmpOut = join(tmpdir(), `openchatcut-clip-${randomUUID()}.${ext}`);
-            await withExportPermit(() => renderClip({ state, outputLocation: tmpOut, codec, transparent }));
+            await withExportPermit(async () => renderClip({
+              state: renderState,
+              outputLocation: tmpOut,
+              codec,
+              transparent,
+              ...await h264RenderOptions(codec),
+            }));
             const buf = await readFile(tmpOut);
             const safe = sanitizeFileName(body?.filename ?? 'clip', 'clip');
             res.statusCode = 200;
@@ -260,19 +385,18 @@ export function exportPlugin(): Plugin {
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           server.config.logger.error(`[render-clip] ${message}`);
-          if (!res.headersSent) sendError(res, 500, message);
-          else res.end();
+          const failure = exportFailureFrom(err);
+          if (!res.headersSent) {
+            if (failure) sendExportFailure(res, failure.stage === 'preflight' ? 422 : 500, failure);
+            else sendError(res, 500, message);
+          } else res.end();
         } finally {
           if (tmpOut) await unlink(tmpOut).catch(() => {});
           if (bakeOut) await unlink(bakeOut).catch(() => {});
+          await cleanupRenderMedia?.();
         }
       });
 
-      // Asynchronous rendering job (submit_export video/audio asynchronous semantics + track_export polling):
-      //   POST /export/job → Enqueue rendering and return { renderId } immediately (the real rendering is run in the background queue).
-      //   GET /export/job/:id → Return job snapshot (status/progress/result/error), unknown → 404.
-      // It must be registered before /export: if '/export' matches the connect prefix, it will also hit '/export/job'. Register first and execute first.
-      // The rendering product falls into uploadDir() using a special prefix, and is retrieved directly by pressing result.path after the browser is finished.
       server.middlewares.use('/export/job', async (req, res) => {
         const path = (req.url ?? '/').split('?')[0];
         const id = path.replace(/^\/+|\/+$/g, '');
@@ -282,9 +406,12 @@ export function exportPlugin(): Plugin {
           const snapshot = getGenerationJobSnapshot(id);
           if (!snapshot) { sendError(res, 404, `render job ${id} not found`); return; }
           if (snapshot.status === 'queued' || snapshot.status === 'running') {
-            sendError(res, 409, 'render job is still running'); return;
+            if (!await cancelActiveExportJob(id)) {
+              sendError(res, 409, 'render job cancellation timed out'); return;
+            }
+          } else {
+            await deleteGenerationJob(id);
           }
-          await deleteGenerationJob(id);
           res.statusCode = 204;
           res.end();
           return;
@@ -293,34 +420,43 @@ export function exportPlugin(): Plugin {
           if (!id) { sendError(res, 400, 'render id is required'); return; }
           const snapshot = getGenerationJobSnapshot(id);
           if (!snapshot) { sendError(res, 404, `render job ${id} not found`); return; }
-          sendJson(res, 200, snapshot);
+          const failure = isExportFailure(snapshot.params.exportFailure)
+            ? snapshot.params.exportFailure
+            : undefined;
+          sendJson(res, 200, failure ? { ...snapshot, failure } : snapshot);
           return;
         }
         if (req.method !== 'POST') { sendError(res, 405, 'method not allowed — POST to enqueue, GET to inspect, DELETE to clean up'); return; }
         if (id) { sendError(res, 404, 'unknown export job route'); return; }
 
+        let acceptedSubmission: AcceptedExportSubmission | undefined;
+        let queued = false;
         try {
           const body = (await readJsonBody(req)) as ExportRequest | null;
-          const plan = planExport(body);
+          acceptedSubmission = await acceptExportSubmission(body);
+          const { plan } = acceptedSubmission;
+          const cleanupRenderMedia = acceptedSubmission.cleanup;
           const uuid = randomUUID();
           const outDir = uploadDir();
           const filename = exportJobFilename(uuid, plan.media.ext);
           const filepath = join(outDir, filename);
           const publicPath = `/media/uploads/${filename}`;
-          const { jobId } = createGenerationJob(
-            {
-              kind: 'export',
-              format: plan.format,
-              codec: plan.media.codec,
-              name: plan.filename,
-              frameRange: plan.frameRange ?? null,
-              totalFrames: plan.totalFrames,
-            },
+          const controller = new AbortController();
+          const jobParams: Record<string, unknown> = {
+            kind: 'export',
+            format: plan.format,
+            codec: plan.media.codec,
+            name: plan.filename,
+            frameRange: plan.frameRange ?? null,
+            totalFrames: plan.totalFrames,
+          };
+          const { jobId } = await createGenerationJob(
+            jobParams,
             async (_jobId, update) => {
               try {
-                await renderExportPlan(plan, filepath, update);
+                const encoding = await renderExportPlan(plan, filepath, update, controller.signal);
                 const { size } = await stat(filepath);
-                const sourceFps = Number((plan.state as { fps?: unknown }).fps);
+                const sourceFps = plan.state.fps;
                 const outputSize = plan.format === 'video' ? exportOutputSize(plan.state, plan.scale) : undefined;
                 return {
                   assetId: uuid,
@@ -330,27 +466,76 @@ export function exportPlugin(): Plugin {
                   durationSeconds: plan.durationSeconds,
                   sizeBytes: size,
                   codec: plan.media.codec,
+                  ...(encoding ?? {}),
                   ...(outputSize ? { ...outputSize, fps: plan.retimeFps ?? sourceFps } : {}),
                   sourceStartSeconds: (plan.frameRange?.[0] ?? 0) / sourceFps,
                 };
               } catch (error) {
-                await unlink(filepath).catch(() => {});
-                throw error;
+                const existing = exportFailureFrom(error);
+                const failure = existing ?? createExportFailure({
+                  stage: 'encode',
+                  code: 'export_output_unreadable',
+                  retryable: true,
+                  cleanupStatus: await cleanupExportOutputs([filepath]),
+                  targetPath: filepath,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+                jobParams.exportFailure = failure;
+                throw new ExportFailureError(failure);
+              } finally {
+                await cleanupRenderMedia();
               }
             },
             {
-              acquire: acquireExportPermit,
-              cleanupResult: async () => { await unlinkWithRetry(filepath); },
+              acquire: async () => {
+                try {
+                  return await acquireExportPermit(controller.signal);
+                } catch (error) {
+                  await cleanupRenderMedia();
+                  const failure = createExportFailure({
+                    stage: controller.signal.aborted ? 'cancel' : 'queue',
+                    code: controller.signal.aborted ? 'export_cancelled' : 'export_queue_failed',
+                    retryable: !controller.signal.aborted,
+                    cleanupStatus: 'not-required',
+                    targetPath: filepath,
+                    message: error instanceof Error ? error.message : String(error),
+                  });
+                  jobParams.exportFailure = failure;
+                  throw new ExportFailureError(failure);
+                }
+              },
+              cleanupPolicy: 'server-export',
+              onSettled: (jobId) => {
+                forgetExportJobController(jobId);
+                void cleanupRenderMedia().catch((error) => {
+                  server.config.logger.warn(
+                    `[export] failed to clean materialized media: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+              },
             },
           );
+          queued = true;
+          trackExportJobController(jobId, controller);
           sendJson(res, 200, { renderId: jobId });
         } catch (err) {
-          // Only synchronous input parameters/JSON verification will fall here (rendering failures are recorded internally in the job).
-          sendError(res, 400, err instanceof Error ? err.message : String(err));
+          if (acceptedSubmission && !queued) await acceptedSubmission.cleanup().catch(() => undefined);
+          if (sendSequenceGraphFailure(res, err)) return;
+          const failure = exportFailureFrom(err);
+          if (failure) sendExportFailure(res, failure.stage === 'preflight' ? 422 : 500, failure);
+          else sendError(res, 400, err instanceof Error ? err.message : String(err));
         }
       });
 
       server.middlewares.use('/export', async (req, res) => {
+        if (req.method === 'GET' && isExportCapabilitiesPath(req.url)) {
+          try {
+            sendJson(res, 200, await exportCapabilities());
+          } catch (error) {
+            sendError(res, 500, error instanceof Error ? error.message : String(error));
+          }
+          return;
+        }
         if (req.method !== 'POST') {
           sendError(res, 405, 'method not allowed — use POST');
           return;
@@ -358,67 +543,45 @@ export function exportPlugin(): Plugin {
 
         let outputLocation: string | null = null;
         let retimedOutput: string | null = null;
+        let acceptedSubmission: AcceptedExportSubmission | undefined;
         try {
           const body = await readJsonBody(req) as ExportRequest | null;
-          const state = body?.state;
-          if (!state || typeof state !== 'object' || !Array.isArray((state as { items?: unknown }).items)) {
-            sendError(res, 400, 'body must be { state: TimelineState } with an items array');
-            return;
-          }
-          const fps = (state as ExportTimeline).fps;
-          if (!Number.isFinite(fps) || fps <= 0) {
-            sendError(res, 400, 'state.fps must be a positive number');
-            return;
-          }
-          if (body?.format !== undefined && body.format !== 'video' && body.format !== 'audio') {
-            sendError(res, 400, 'format must be video or audio');
-            return;
-          }
-          if (body?.codec !== undefined && !['h264', 'vp8', 'mp3', 'wav'].includes(body.codec)) {
-            sendError(res, 400, 'codec must be h264, vp8, mp3, or wav');
-            return;
-          }
-          if (body?.name !== undefined && typeof body.name !== 'string') {
-            sendError(res, 400, 'name must be a string');
-            return;
-          }
-          if ([body.startSeconds, body.endSeconds].some((value) => value !== undefined && (typeof value !== 'number' || !Number.isFinite(value)))) {
-            sendError(res, 400, 'startSeconds and endSeconds must be finite numbers');
-            return;
-          }
-
-          const format = body.format ?? 'video';
-          const codec = body.codec ?? (format === 'audio' ? 'mp3' : 'h264');
-          if ((format === 'audio') !== (codec === 'mp3' || codec === 'wav')) {
-            sendError(res, 400, `${format} export does not support codec=${codec}`);
-            return;
-          }
+          let plan: ExportPlan;
           try {
-            validateVideoParams(body, format);
-          } catch (err) {
-            sendError(res, 400, err instanceof Error ? err.message : String(err));
+            acceptedSubmission = await acceptExportSubmission(body);
+            plan = acceptedSubmission.plan;
+          } catch (error) {
+            if (sendSequenceGraphFailure(res, error)) return;
+            const failure = exportFailureFrom(error);
+            if (failure) sendExportFailure(res, failure.stage === 'preflight' ? 422 : 500, failure);
+            else sendError(res, 400, error instanceof Error ? error.message : String(error));
             return;
           }
-          const media = EXPORT_MEDIA[codec];
-          const startFrame = body.startFrame ?? (body.startSeconds === undefined ? undefined : Math.floor(body.startSeconds * fps));
-          const endFrameExclusive = body.endFrameExclusive ?? (body.endSeconds === undefined ? undefined : Math.ceil(body.endSeconds * fps));
-          const frameRange = normalizeFrameRange(
-            exportDuration(state as ExportTimeline),
-            startFrame,
-            endFrameExclusive,
-          );
-          const filename = exportFilename(body.name, media.ext);
-
+          const { state, format, media, frameRange, filename, scale } = plan;
           const finalOutput = join(tmpdir(), `openchatcut-export-${randomUUID()}.${media.ext}`);
           outputLocation = finalOutput;
-          const scale = exportScale(state as { width?: unknown; height?: unknown }, body.resolution);
           await withExportPermit(async () => {
-            await renderTimeline({ state, outputLocation: finalOutput, codec: media.codec, frameRange, scale });
-            if (format === 'video' && body.fps !== undefined && body.fps !== fps) {
+            await renderTimeline({
+              state,
+              project: plan.project,
+              timelineId: plan.timelineId,
+              outputLocation: finalOutput,
+              codec: media.codec,
+              frameRange,
+              scale,
+              videoBitrate: plan.videoBitrate,
+              ...await h264RenderOptions(media.codec),
+            });
+            if (format === 'video' && plan.retimeFps !== undefined) {
               retimedOutput = `${finalOutput}.retimed.${media.ext}`;
               const outputSize = exportOutputSize(state, scale);
-              await retimeFps(finalOutput, retimedOutput, body.fps, media.codec as 'h264' | 'vp8',
-                resolveH264TargetBitrate({ ...outputSize, fps: body.fps }));
+              await retimeFps(
+                finalOutput,
+                retimedOutput,
+                plan.retimeFps,
+                media.codec as 'h264' | 'vp8',
+                plan.videoBitrate ?? resolveH264TargetBitrate({ ...outputSize, fps: plan.retimeFps }),
+              );
               await unlink(finalOutput).catch(() => {});
               await rename(retimedOutput, finalOutput);
               retimedOutput = null;
@@ -432,14 +595,24 @@ export function exportPlugin(): Plugin {
           res.setHeader('Content-Disposition', contentDisposition(filename));
           res.end(buf);
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          const status = err instanceof RangeError ? 400 : 500;
-          if (status === 500) server.config.logger.error(`[export] ${message}`);
-          if (!res.headersSent) sendError(res, status, message);
+          const cleanupStatus = await cleanupExportOutputs([outputLocation, retimedOutput]);
+          outputLocation = null;
+          retimedOutput = null;
+          const existing = exportFailureFrom(err);
+          const failure = existing ?? createExportFailure({
+            stage: 'render',
+            code: 'export_render_failed',
+            retryable: true,
+            cleanupStatus,
+            targetPath: null,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          if (!res.headersSent) sendExportFailure(res, err instanceof RangeError ? 400 : 500, failure);
           else res.end();
         } finally {
           if (outputLocation) await unlink(outputLocation).catch(() => {});
           if (retimedOutput) await unlink(retimedOutput).catch(() => {});
+          await acceptedSubmission?.cleanup();
         }
       });
     },

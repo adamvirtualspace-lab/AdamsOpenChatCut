@@ -4,16 +4,17 @@
 // at render time in headless Chrome exactly as the Player does, so audio muxes
 // natively and no template porting is needed.
 import { bundle } from '@remotion/bundler';
-import { selectComposition, renderMedia, renderStill } from '@remotion/renderer';
+import { makeCancelSignal, RenderInternals, selectComposition, renderMedia, renderStill } from '@remotion/renderer';
 import path from 'node:path';
 import { cp, mkdir, rm, symlink } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import {
+  h264FfmpegOverride,
   remotionHardwareAcceleration,
   resolveH264VideoBitrate,
   resolveOffthreadVideoThreads,
   resolveRenderConcurrency,
-  withHardwareEncoderFallback,
+  withEncoderProfileFallback,
 } from './performance.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -25,6 +26,29 @@ const PUBLIC_DIR = path.join(REPO_ROOT, 'public');
 const UPLOAD_DIR = path.join(PUBLIC_DIR, 'media', 'uploads');
 const COMPOSITION_ID = 'timeline';
 
+const H264_PROFILE_LABELS = {
+  h264_videotoolbox: 'Apple VideoToolbox',
+  h264_nvenc: 'NVIDIA NVENC',
+  h264_qsv: 'Intel Quick Sync Video',
+  h264_amf: 'AMD AMF',
+  h264_vaapi: 'Linux VA-API',
+  libx264: 'Software (libx264)',
+};
+
+function normalizeH264Profile(codec, profile) {
+  if (codec !== 'h264') return undefined;
+  const id = profile?.id;
+  if (typeof id !== 'string' || !Object.hasOwn(H264_PROFILE_LABELS, id)) {
+    return { id: 'libx264', label: H264_PROFILE_LABELS.libx264, hardware: false, transport: 'server' };
+  }
+  return {
+    id,
+    label: H264_PROFILE_LABELS[id],
+    hardware: id !== 'libx264',
+    transport: 'server',
+  };
+}
+
 // Bundling is expensive (webpack over the whole app + @babel/standalone), so we
 // build the serve bundle once and reuse the serveUrl across every render.
 let bundlePromise;
@@ -35,45 +59,218 @@ let bundlePromise;
 // (Default undefined = Remotion self-seeking/self-downloading, dev behavior remains unchanged).
 const browserExecutable = () => process.env.CC_BROWSER_EXECUTABLE || undefined;
 
-const renderConcurrency = () => resolveRenderConcurrency();
+export function currentRenderConcurrency() {
+  return resolveRenderConcurrency();
+}
+
+export function remotionFfmpegPath() {
+  return RenderInternals.getExecutablePath({
+    type: 'ffmpeg',
+    indent: false,
+    logLevel: 'error',
+    binariesDirectory: null,
+  });
+}
+
 const offthreadVideoThreads = () => resolveOffthreadVideoThreads();
+function remotionCancelSignal(signal) {
+  if (!signal) return undefined;
+  const cancellation = makeCancelSignal();
+  if (signal.aborted) cancellation.cancel();
+  else signal.addEventListener('abort', cancellation.cancel, { once: true });
+  return cancellation.cancelSignal;
+}
+const RENDER_MEDIA_FIELD = /(?:^|_)(?:src|url|path|cube|lut)$/i;
+const RENDER_MEDIA_FIELD_SUFFIX = /(?:Src|Url|Path)$/;
+
+function renderSnapshotRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value : null;
+}
+
+function renderSnapshotString(record, key) {
+  const value = record?.[key];
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function renderMediaField(key) {
+  return RENDER_MEDIA_FIELD.test(key) || RENDER_MEDIA_FIELD_SUFFIX.test(key);
+}
 
 /**
- * Prefer the platform encoder, but retry with software when the encoder exists
- * in FFmpeg yet the actual GPU/driver is unavailable (common on Windows VMs and
- * systems without an NVIDIA device). Remotion's own probe only checks whether
- * the encoder is listed in the bundled FFmpeg build.
+ * Defense in depth: inspect only the active timeline and sequence timelines it
+ * can render. Server entrypoints materialize this same render-visible closure.
  */
+export function assertMaterializedRenderSnapshot(snapshot, operation = 'render', timelineId) {
+  const root = renderSnapshotRecord(snapshot);
+  if (!root) return;
+
+  const timelines = new Map();
+  const registerTimeline = (value, fallbackId) => {
+    const timeline = renderSnapshotRecord(value);
+    if (!timeline || !Array.isArray(timeline.items)) return;
+    const id = renderSnapshotString(timeline, 'id') ?? fallbackId;
+    if (id) timelines.set(id, timeline);
+  };
+  registerTimeline(root);
+  if (Array.isArray(root.timelines)) {
+    for (const timeline of root.timelines) registerTimeline(timeline);
+  }
+  for (const containerKey of ['sequenceTimelines', 'sequences', 'timelineById']) {
+    const container = renderSnapshotRecord(root[containerKey]);
+    if (!container) continue;
+    for (const [id, timeline] of Object.entries(container)) registerTimeline(timeline, id);
+  }
+
+  const assets = new Map();
+  const registerAssets = (value) => {
+    if (!Array.isArray(value)) return;
+    for (const candidate of value) {
+      const asset = renderSnapshotRecord(candidate);
+      const id = renderSnapshotString(asset, 'id');
+      if (asset && id) assets.set(id, asset);
+    }
+  };
+  registerAssets(root.assets);
+  for (const timeline of timelines.values()) registerAssets(timeline.assets);
+
+  const assertExternal = (source, field) => {
+    if (/^https?:\/\//i.test(source.trim())) {
+      throw new Error(`${operation}: external media at ${field} was not materialized`);
+    }
+  };
+  const scanned = new WeakSet();
+  const scanMediaFields = (value, fieldPrefix) => {
+    if (value === null || typeof value !== 'object' || scanned.has(value)) return;
+    scanned.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((child, index) => scanMediaFields(child, `${fieldPrefix}[${index}]`));
+      return;
+    }
+    for (const [key, child] of Object.entries(value)) {
+      const field = fieldPrefix ? `${fieldPrefix}.${key}` : key;
+      if (typeof child === 'string' && /assetId$/i.test(key)) {
+        const asset = assets.get(child);
+        const assetSource = renderSnapshotString(asset, 'src');
+        if (assetSource) assertExternal(assetSource, `assets.${child}.src`);
+      } else if (typeof child === 'string' && renderMediaField(key)) {
+        assertExternal(child, field);
+      } else if (child && typeof child === 'object') {
+        scanMediaFields(child, field);
+      }
+    }
+  };
+
+  const visited = new Set();
+  const visitTimeline = (timeline, fallbackId) => {
+    if (visited.has(timeline)) return;
+    visited.add(timeline);
+    const id = renderSnapshotString(timeline, 'id') ?? fallbackId;
+    const prefix = id ? `timelines.${id}` : 'timeline';
+    const items = Array.isArray(timeline.items)
+      ? timeline.items.filter((item) => renderSnapshotRecord(item))
+      : [];
+    for (const item of items) {
+      const itemId = renderSnapshotString(item, 'id');
+      const itemPrefix = `${prefix}.items.${itemId ?? '(unknown)'}`;
+      scanMediaFields(item, itemPrefix);
+
+      if (Array.isArray(item.effects)) {
+        for (const effect of item.effects) {
+          const effectRecord = renderSnapshotRecord(effect);
+          const assetId = renderSnapshotString(effectRecord, 'assetId');
+          const fxDefs = renderSnapshotRecord(timeline.fxDefs);
+          const fxDef = assetId && fxDefs ? renderSnapshotRecord(fxDefs[assetId]) : null;
+          if (fxDef) scanMediaFields(fxDef, `${prefix}.fxDefs.${assetId}`);
+        }
+      }
+
+      if (renderSnapshotString(item, 'kind') === 'sequence') {
+        const nestedId = renderSnapshotString(item, 'timelineId');
+        const nested = nestedId ? timelines.get(nestedId) : undefined;
+        if (nested) visitTimeline(nested, nestedId);
+      }
+    }
+
+    if (Array.isArray(timeline.transitions)) {
+      for (const transition of timeline.transitions) {
+        const transitionRecord = renderSnapshotRecord(transition);
+        if (transitionRecord && transitionRecord.enabled !== false) {
+          scanMediaFields(transitionRecord, `${prefix}.transitions`);
+        }
+      }
+    }
+
+    const captionPayloads = [timeline.captions];
+    const tracks = renderSnapshotRecord(timeline.tracks);
+    if (tracks) {
+      for (const track of Object.values(tracks)) {
+        const trackRecord = renderSnapshotRecord(track);
+        if (trackRecord) captionPayloads.push(trackRecord.captions);
+      }
+    }
+    for (const captions of captionPayloads) {
+      const captionRecord = renderSnapshotRecord(captions);
+      if (captionRecord && captionRecord.enabled !== false) {
+        scanMediaFields(captionRecord, `${prefix}.captions`);
+      }
+    }
+  };
+
+  if (Array.isArray(root.items)) {
+    visitTimeline(root, renderSnapshotString(root, 'id'));
+    return;
+  }
+  const activeId = timelineId ?? renderSnapshotString(root, 'activeTimelineId');
+  const active = activeId ? timelines.get(activeId) : timelines.values().next().value;
+  if (active) visitTimeline(active, activeId);
+}
+
+
+
+/** Render with the selected probed engine, then make a truthful software retry. */
 async function renderMediaOptimized(options) {
-  const hardwareAcceleration = remotionHardwareAcceleration(options.codec);
-  const automaticHardwareBitrate = hardwareAcceleration !== 'disable' && !options.videoBitrate
+  const { h264Profile, vaapiDevice, ...renderOptions } = options;
+  const profile = normalizeH264Profile(renderOptions.codec, h264Profile);
+  const hardwareAcceleration = remotionHardwareAcceleration(renderOptions.codec, {
+    encoder: profile?.id,
+  });
+  const customOverride = profile?.hardware && hardwareAcceleration === 'disable'
+    ? h264FfmpegOverride(profile.id, { vaapiDevice })
+    : undefined;
+  const automaticBitrate = profile?.hardware && !renderOptions.videoBitrate
     ? resolveH264VideoBitrate({
-      width: options.composition.width,
-      height: options.composition.height,
-      fps: options.composition.fps,
-      scale: options.scale ?? 1,
+      width: renderOptions.composition.width,
+      height: renderOptions.composition.height,
+      fps: renderOptions.composition.fps,
+      scale: renderOptions.scale ?? 1,
     })
     : null;
-  const optimized = {
-    ...options,
-    concurrency: renderConcurrency(),
+  const hardwareOptions = {
+    ...renderOptions,
+    concurrency: currentRenderConcurrency(),
     offthreadVideoThreads: offthreadVideoThreads(),
     hardwareAcceleration,
-    ...(automaticHardwareBitrate ? { videoBitrate: automaticHardwareBitrate } : {}),
+    ...(customOverride ? { ffmpegOverride: customOverride } : {}),
+    ...(automaticBitrate ? { videoBitrate: automaticBitrate } : {}),
   };
-  return withHardwareEncoderFallback({
+  if (!profile) return { result: await renderMedia(hardwareOptions), encoder: undefined };
+  return withEncoderProfileFallback({
     render: renderMedia,
-    hardwareOptions: optimized,
+    hardwareOptions,
     softwareOptions: {
-      ...optimized,
+      ...hardwareOptions,
       hardwareAcceleration: 'disable',
-      ...(automaticHardwareBitrate ? { videoBitrate: null } : {}),
+      ffmpegOverride: undefined,
+      ...(automaticBitrate ? { videoBitrate: null } : {}),
     },
+    hardwareProfile: profile,
     cleanup: async () => {
-      if (options.outputLocation) await rm(options.outputLocation, { force: true }).catch(() => {});
+      if (renderOptions.outputLocation) {
+        await rm(renderOptions.outputLocation, { force: true }).catch(() => {});
+      }
     },
     onFallback: () => {
-      console.warn(`[render] hardware encoder unavailable; retrying ${options.codec} with software encoding`);
+      console.warn(`[render] ${profile.label} failed; retrying ${renderOptions.codec} with software encoding`);
     },
   });
 }
@@ -108,6 +305,13 @@ async function buildBundle(outDir) {
     // bundle's webpack the same trick (asset/source = raw text module).
     webpackOverride: (config) => ({
       ...config,
+      resolve: {
+        ...config.resolve,
+        extensionAlias: {
+          ...config.resolve?.extensionAlias,
+          '.js': ['.js', '.ts', '.tsx'],
+        },
+      },
       module: {
         ...config.module,
         rules: [...(config.module?.rules ?? []), { test: /\.frag$/, type: 'asset/source' }],
@@ -173,40 +377,71 @@ async function getServeUrl() {
  * Render a timeline state to video or audio at outputLocation.
  * @param {object} args
  * @param {import('../src/editor/types').TimelineState} args.state
+ * @param {import('../src/editor/types').ProjectDoc} [args.project]
+ * @param {string} [args.timelineId]
  * @param {string} args.outputLocation  absolute output path
  * @param {'h264'|'vp8'|'mp3'|'wav'} [args.codec]
  * @param {[number, number]} [args.frameRange] inclusive Remotion frame range
+ * @param {number} [args.videoBitrate] video bitrate in bits per second
+ * @param {{id:string,label:string,hardware:boolean,transport:'server'}} [args.h264Profile]
+ * @param {string} [args.vaapiDevice]
  * @param {(progress: number) => void} [args.onProgress]  0..1
- * @returns {Promise<string>} the outputLocation
+ * @param {AbortSignal} [args.signal]
  */
-export async function renderTimeline({ state, outputLocation, onProgress, codec = 'h264', frameRange, scale }) {
+export async function renderTimeline({
+  state,
+  project,
+  timelineId,
+  outputLocation,
+  onProgress,
+  codec = 'h264',
+  frameRange,
+  scale,
+  videoBitrate,
+  h264Profile,
+  vaapiDevice,
+  signal,
+}) {
   if (!state || typeof state !== 'object' || !Array.isArray(state.items)) {
     throw new Error('renderTimeline: a valid TimelineState (with items[]) is required');
   }
   if (!outputLocation) throw new Error('renderTimeline: outputLocation is required');
+  signal?.throwIfAborted();
+  assertMaterializedRenderSnapshot(state, 'renderTimeline');
+  if (project) assertMaterializedRenderSnapshot(project, 'renderTimeline', timelineId);
+  const cancelSignal = remotionCancelSignal(signal);
 
   const serveUrl = await getServeUrl();
-  const inputProps = { state };
-
-  const composition = await selectComposition({ serveUrl, id: COMPOSITION_ID, inputProps, browserExecutable: browserExecutable() });
-
-  await renderMediaOptimized({
+  const inputProps = { state, project, timelineId };
+  const composition = await selectComposition({
+    serveUrl, id: COMPOSITION_ID, inputProps, browserExecutable: browserExecutable(),
+  });
+  signal?.throwIfAborted();
+  const rendered = await renderMediaOptimized({
     serveUrl,
     composition,
     codec,
     frameRange,
     inputProps,
     outputLocation,
-    // Resolution export: scale by short side (1080p timeline select 720p → scale 2/3); default 1 does not scale
+    h264Profile,
+    vaapiDevice,
     scale: scale && Number.isFinite(scale) && scale > 0 ? scale : 1,
-    // GLSL transitions need WebGL2 in headless Chrome; 'angle' uses the native
-    // GPU backend (Metal on macOS). Swap to 'swangle' (SwiftShader) on servers.
+    videoBitrate: Number.isFinite(videoBitrate) && videoBitrate > 0
+      ? `${Math.round(videoBitrate / 1000)}k`
+      : undefined,
     chromiumOptions: { gl: 'angle' },
     browserExecutable: browserExecutable(),
     onProgress: onProgress ? ({ progress }) => onProgress(progress) : undefined,
+    cancelSignal,
   });
-
-  return outputLocation;
+  return {
+    outputLocation,
+    ...(rendered.encoder ? { encoder: rendered.encoder } : {}),
+    ...(rendered.encoderFallbackReason
+      ? { encoderFallbackReason: rendered.encoderFallbackReason }
+      : {}),
+  };
 }
 
 /**
@@ -219,24 +454,32 @@ export async function renderTimeline({ state, outputLocation, onProgress, codec 
  * @param {'prores'|'vp8'|'h264'} [args.codec]
  * @param {boolean} [args.transparent]  render over transparency + carry alpha
  */
-export async function renderClip({ state, outputLocation, codec = 'vp8', transparent = true }) {
+export async function renderClip({
+  state,
+  outputLocation,
+  codec = 'vp8',
+  transparent = true,
+  h264Profile,
+  vaapiDevice,
+}) {
   if (!state || !Array.isArray(state.items) || !state.items.length) {
     throw new Error('renderClip: a single-item TimelineState is required');
   }
   if (!outputLocation) throw new Error('renderClip: outputLocation is required');
+  assertMaterializedRenderSnapshot(state, 'renderClip');
   const serveUrl = await getServeUrl();
   const inputProps = { state, transparent };
-  const composition = await selectComposition({ serveUrl, id: COMPOSITION_ID, inputProps, browserExecutable: browserExecutable() });
+  const composition = await selectComposition({
+    serveUrl, id: COMPOSITION_ID, inputProps, browserExecutable: browserExecutable(),
+  });
   await renderMediaOptimized({
     serveUrl,
     composition,
     codec,
     inputProps,
     outputLocation,
-    // alpha: png intermediate carries the alpha channel; ProRes 4444 needs the
-    // explicit yuva444 pixel format (without it, it falls back to opaque 422).
-    // (vp8/vp9 alpha webm doesn't work in this ffmpeg build, so convert to video uses
-    // opaque h264 — see clipExport.ts.)
+    h264Profile,
+    vaapiDevice,
     ...(transparent && codec === 'prores'
       ? { proResProfile: '4444', imageFormat: 'png', pixelFormat: 'yuva444p10le' }
       : {}),
@@ -258,11 +501,13 @@ export async function renderClip({ state, outputLocation, codec = 'vp8', transpa
 /** Cap stills per call (contact-sheet path further compresses into one image). */
 const STILL_MAX_FRAMES = 16;
 
-export async function renderTimelineStills({ state, frames, puppeteerInstance }) {
+export async function renderTimelineStills({ state, project, timelineId, frames, puppeteerInstance }) {
   if (!state || !Array.isArray(state.items)) throw new Error('renderTimelineStills: state.items required');
   if (!Array.isArray(frames) || !frames.length) throw new Error('renderTimelineStills: frames[] required');
+  assertMaterializedRenderSnapshot(state, 'renderTimelineStills');
+  if (project) assertMaterializedRenderSnapshot(project, 'renderTimelineStills', timelineId);
   const serveUrl = await getServeUrl();
-  const inputProps = { state };
+  const inputProps = { state, project, timelineId };
   // Reuse one browser for the batch when caller doesn't pass one — opening Chrome
   // per frame was the dominant cost of view_*_frames.
   const { openBrowser } = await import('@remotion/renderer');

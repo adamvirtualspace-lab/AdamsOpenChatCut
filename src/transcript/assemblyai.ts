@@ -48,6 +48,31 @@ async function uploadBlob(blob: Blob): Promise<string> {
   return upload_url;
 }
 
+async function uploadLocalPath(path: string): Promise<string> {
+  const response = await serviceFetch('/api/assemblyai-upload', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ src: path }),
+  });
+  const responseText = await response.text();
+  if (response.status === 404) {
+    throw new TranscriptionError('source-unavailable', responseText.slice(0, 300));
+  }
+  if (!response.ok) {
+    throw new Error(`AssemblyAI server upload failed: HTTP ${response.status}${responseText ? `: ${responseText.slice(0, 300)}` : ''}`);
+  }
+  let body: { uploadUrl?: unknown };
+  try {
+    body = JSON.parse(responseText) as { uploadUrl?: unknown };
+  } catch {
+    throw new Error('AssemblyAI server upload returned invalid JSON');
+  }
+  if (typeof body.uploadUrl !== 'string' || !body.uploadUrl) {
+    throw new Error('AssemblyAI server upload returned no upload URL');
+  }
+  return body.uploadUrl;
+}
+
 export interface TranscribeOptions {
   /**
    * ISO-639-1. Default `zh` for this product (Chinese oral broadcast).
@@ -60,6 +85,24 @@ export interface TranscribeOptions {
    */
   asrPath?: string | null;
 }
+
+export type AssemblyAiProviderStatus =
+  | 'uploaded'
+  | 'submitted'
+  | 'queued'
+  | 'processing'
+  | 'completed'
+  | 'error';
+
+export interface AssemblyAiResumeCheckpoint {
+  uploadUrl?: string;
+  providerJobId?: string;
+  providerStatus?: AssemblyAiProviderStatus;
+}
+
+export type AssemblyAiCheckpointWriter = (
+  checkpoint: AssemblyAiResumeCheckpoint,
+) => void | Promise<void>;
 
 async function createTranscript(audioUrl: string, opts: TranscribeOptions = {}): Promise<string> {
   const body: Record<string, unknown> = {
@@ -88,11 +131,18 @@ async function createTranscript(audioUrl: string, opts: TranscribeOptions = {}):
   return id;
 }
 
-async function poll(id: string, onWait?: () => void): Promise<TranscriptResult> {
+async function poll(
+  id: string,
+  onWait?: () => void,
+  onCheckpoint?: AssemblyAiCheckpointWriter,
+  resume: AssemblyAiResumeCheckpoint = {},
+): Promise<TranscriptResult> {
   for (;;) {
     const r = await serviceFetch(`${BASE}/transcript/${id}`);
     if (!r.ok) throw new Error(`poll failed: HTTP ${r.status}`);
     const d = await r.json();
+    const providerStatus = String(d.status ?? 'processing') as AssemblyAiProviderStatus;
+    await onCheckpoint?.({ ...resume, providerJobId: id, providerStatus });
     if (d.status === 'completed') {
       const mapW = (w: { text: string; start: number; end: number; speaker?: string | null }) => ({
         text: (w.text ?? '').trim(),
@@ -192,26 +242,82 @@ async function shouldExtractForAsr(path: string): Promise<boolean> {
  * small ASR track server-side; then only that small blob is sent to AssemblyAI.
  * Pass opts.asrPath when extract already raced ahead of normalize/finalize.
  */
+async function transcriptionSourceForPath(path: string, opts: TranscribeOptions): Promise<string> {
+  if (opts.asrPath && opts.asrPath.startsWith('/media/')) return opts.asrPath;
+  if (await shouldExtractForAsr(path)) {
+    const extracted = await extractAudioForAsr(path);
+    if (extracted) return extracted;
+  }
+  return path;
+}
+
+async function uploadTranscriptionSource(path: string): Promise<string> {
+  if (path.startsWith('/media/uploads/')) {
+    try {
+      return await uploadLocalPath(path);
+    } catch (error) {
+      if (!(error instanceof TranscriptionError) || error.code !== 'source-unavailable') throw error;
+    }
+  }
+  return uploadBlob(await loadTranscriptionSource(path));
+}
+
+async function uploadTranscriptionPath(path: string, opts: TranscribeOptions): Promise<string> {
+  const source = await transcriptionSourceForPath(path, opts);
+  try {
+    return await uploadTranscriptionSource(source);
+  } catch (error) {
+    // A raced-ahead ASR extract can disappear independently of the original.
+    // Fall back to the original media (or its IndexedDB copy) before failing.
+    if (
+      source === path
+      || !(error instanceof TranscriptionError)
+      || error.code !== 'source-unavailable'
+    ) throw error;
+    return uploadTranscriptionSource(path);
+  }
+}
+
+/**
+ * Resume from the latest durable provider checkpoint. A known upload URL skips
+ * re-upload; a known provider job id skips both upload and duplicate submission.
+ */
+export async function transcribePathResumable(
+  path: string,
+  resume: AssemblyAiResumeCheckpoint,
+  onCheckpoint: AssemblyAiCheckpointWriter,
+  onWait?: () => void,
+  opts: TranscribeOptions = {},
+): Promise<TranscriptResult> {
+  let checkpoint = { ...resume };
+  let providerJobId = checkpoint.providerJobId;
+  if (!providerJobId) {
+    let uploadUrl = checkpoint.uploadUrl;
+    if (!uploadUrl) {
+      uploadUrl = await uploadTranscriptionPath(path, opts);
+      checkpoint = { ...checkpoint, uploadUrl, providerStatus: 'uploaded' };
+      await onCheckpoint(checkpoint);
+    }
+    providerJobId = await createTranscript(uploadUrl, opts);
+    checkpoint = {
+      ...checkpoint,
+      uploadUrl,
+      providerJobId,
+      providerStatus: 'submitted',
+    };
+    // This write is awaited before the first poll, closing the refresh/re-upload window.
+    await onCheckpoint(checkpoint);
+  }
+  return poll(providerJobId, onWait, async (next) => {
+    checkpoint = next;
+    await onCheckpoint(next);
+  }, checkpoint);
+}
+
 export async function transcribePath(
   path: string,
   onWait?: () => void,
   opts: TranscribeOptions = {},
 ): Promise<TranscriptResult> {
-  let source = path;
-  if (opts.asrPath && opts.asrPath.startsWith('/media/')) {
-    source = opts.asrPath;
-  } else if (await shouldExtractForAsr(path)) {
-    const extracted = await extractAudioForAsr(path);
-    if (extracted) source = extracted;
-  }
-  let blob: Blob;
-  try {
-    blob = await loadTranscriptionSource(source);
-  } catch (error) {
-    // A raced-ahead ASR extract can disappear independently of the original.
-    // Fall back to the original media (or its IndexedDB copy) before failing.
-    if (source === path) throw error;
-    blob = await loadTranscriptionSource(path);
-  }
-  return transcribeBlob(blob, onWait, { languageCode: opts.languageCode });
+  return transcribePathResumable(path, {}, () => {}, onWait, opts);
 }

@@ -12,6 +12,7 @@ import type { AudioAsset } from '../audio/library';
 import { FX_EFFECTS, FX_IDS, LUT_EFFECTS, LUT_IDS } from '../gl/fx/effects';
 import { TranscriptPanel, type TranscriptTrackOption } from '../transcript/TranscriptPanel';
 import { CaptionsPanel } from '../captions/CaptionsPanel';
+import { newManualCaptions } from '../captions/manualCaptions';
 import { MediaPoolPanel } from '../media/MediaPoolPanel';
 import { TemplateBrowser } from './TemplateBrowser';
 import { ResourceBrowser, type ResourceItem } from './ResourceBrowser';
@@ -26,6 +27,7 @@ import { isPluginAssetId } from '../plugins/types';
 import { customTransitionUniforms, getCustomTransition } from '../gl/customTransitions';
 import type { ZoomEffect } from '../editor/types';
 import { Icon } from '../components/icons';
+import { parseSrt } from '../captions/srt';
 
 // Two built-in LUTs implemented with published camera-log transfer functions.
 // They apply through the same pipeline as other effects.
@@ -43,6 +45,13 @@ const AUDIO_TRANSITION_ITEMS: ResourceItem[] = AUDIO_TRANSITION_ORDER.map((t) =>
 }));
 const FX_ITEMS: ResourceItem[] = FX_IDS.map((id) => ({ id, name: FX_EFFECTS[id].name }));
 const ZOOM_ITEMS: ResourceItem[] = ZOOM_SHAPE_ORDER.map((s) => ({ id: s, name: ZOOM_SHAPE_LABELS[s] }));
+export interface SequenceLibraryOption {
+  id: string;
+  name: string;
+  durationInFrames: number;
+  disabledReason?: string;
+}
+
 interface LibraryPanelProps {
   semanticScopeId: string;
   templates: Tpl[];
@@ -51,10 +60,13 @@ interface LibraryPanelProps {
   playerRef: RefObject<PlayerRef | null>;
   fps: number;
   items: TimelineItem[];
+  sequenceOptions: SequenceLibraryOption[];
+  onAddSequence: (timelineId: string) => void;
   /** A1/V1 aliases + names for script track picker */
   trackOptions: TranscriptTrackOption[];
   captionTracks: Array<TranscriptTrackOption & { captions: CaptionsData | null }>;
   onSetCaptions: (c: CaptionsData | null, track?: TrackId) => void;
+  onCreateCaptionTrack: (captions: CaptionsData, opts?: { name?: string; order?: number }) => TrackId;
   onUpdateCaptions: (patch: Partial<CaptionsData>, track?: TrackId) => void;
   onSetItemTranscript: (id: string, words: TranscriptWord[]) => void;
   onToggleWord: (id: string, idx: number) => void;
@@ -78,7 +90,7 @@ interface LibraryPanelProps {
   onRenameMediaAsset: (id: string, name: string) => void;
   onSetMediaAssetFavorite: (id: string, favorite: boolean) => void;
   onRemoveMediaAsset: (id: string) => void;
-  onRelinkMediaAsset?: (id: string, next: { src: string; name?: string; durationInFrames?: number; width?: number; height?: number; kind?: MediaAsset['kind'] }) => void;
+  onRelinkMediaAsset?: (id: string, next: { src: string; name?: string; durationInFrames?: number; width?: number; height?: number; kind?: MediaAsset['kind']; sourceRevision?: string; sourceSize?: number; sourceModifiedAt?: number }) => void;
   onAddSolid?: () => void;
   /** ⋮ menu「Generated with AI」: seed the chat with this template as a reference */
   onUseTemplateAI: (tpl: Tpl) => void;
@@ -91,9 +103,9 @@ interface LibraryPanelProps {
   onApplyZoom: (zoom: ZoomEffect) => void;
 }
 
-const MAIN_TABS = ['我的素材', '资源库', '文字稿', '字幕'] as const;
+const MAIN_TABS = ['我的素材', '序列', '资源库', '文字稿', '字幕'] as const;
 const SUB_TABS = ['MG 动画', '音效', '转场', '特效', '缩放', 'LUT'] as const;
-export function LibraryPanel({ semanticScopeId, templates, onAddTemplate, onAddAudio, playerRef, fps, items, trackOptions, captionTracks, onSetCaptions, onUpdateCaptions, onSetItemTranscript, onToggleWord, onCleanScript, onSetGapCap, onSetTranscriptPlayOrder, onReorderTrackItems, onClearEdits, onClearTranscript, assets, mediaFolders, offlineAssetIds, onAssetLoadError, onImportMedia, onImportMobileMedia, onAddMediaItem, onCreateMediaFolder, onRenameMediaFolder, onDeleteMediaFolder, onMoveMediaAssets, onRenameMediaAsset, onSetMediaAssetFavorite, onRemoveMediaAsset, onRelinkMediaAsset, onAddSolid, onUseTemplateAI, selectedItem, onApplyTransition, onApplyFx, onApplyZoom }: LibraryPanelProps) {
+export function LibraryPanel({ semanticScopeId, templates, onAddTemplate, onAddAudio, playerRef, fps, items, sequenceOptions, onAddSequence, trackOptions, captionTracks, onSetCaptions, onCreateCaptionTrack, onUpdateCaptions, onSetItemTranscript, onToggleWord, onCleanScript, onSetGapCap, onSetTranscriptPlayOrder, onReorderTrackItems, onClearEdits, onClearTranscript, assets, mediaFolders, offlineAssetIds, onAssetLoadError, onImportMedia, onImportMobileMedia, onAddMediaItem, onCreateMediaFolder, onRenameMediaFolder, onDeleteMediaFolder, onMoveMediaAssets, onRenameMediaAsset, onSetMediaAssetFavorite, onRemoveMediaAsset, onRelinkMediaAsset, onAddSolid, onUseTemplateAI, selectedItem, onApplyTransition, onApplyFx, onApplyZoom }: LibraryPanelProps) {
   const t = useT();
   const selKind = selectedItem?.kind ?? null;
   const isVisual = selKind != null && selKind !== 'audio';
@@ -121,13 +133,27 @@ export function LibraryPanel({ semanticScopeId, templates, onAddTemplate, onAddA
   const isTranscript = mainTab === '文字稿';
   const isCaptions = mainTab === '字幕';
   const isMyAssets = mainTab === '我的素材';
+  const isSequences = mainTab === '序列';
   const openCaptionStyles = (sourceItemIds: string[]) => {
     const target = captionTracks[0];
-    if (!target) return;
-    if (!target.captions && sourceItemIds.length) {
-      onSetCaptions({ enabled: true, template: 'black-bar', pacing: 'phrase', sourceItemId: sourceItemIds[0]!, sources: sourceItemIds.length > 1 ? sourceItemIds : undefined, sourceMode: sourceItemIds.length > 1 ? 'item' : undefined, bilingual: false }, target.id);
+    if (!target?.captions && sourceItemIds.length) {
+      onSetCaptions({ enabled: true, template: 'black-bar', pacing: 'phrase', sourceItemId: sourceItemIds[0]!, sources: sourceItemIds.length > 1 ? sourceItemIds : undefined, sourceMode: sourceItemIds.length > 1 ? 'item' : undefined, bilingual: false }, target?.id);
     }
     setMainTab('字幕');
+  };
+  const importSrt = async (file: File) => {
+    try {
+      const words = parseSrt(await file.text());
+      const entryId = `srt_${crypto.randomUUID()}`;
+      onCreateCaptionTrack({
+        ...newManualCaptions(),
+        sourceEntries: [{ id: entryId, itemId: `manual:${entryId}`, label: file.name, words }],
+      }, { name: file.name.replace(/\.srt$/i, '') || file.name });
+      setMainTab('字幕');
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      window.alert(`${t('SRT 导入失败')}：${t(detail)}`);
+    }
   };
 
   return (
@@ -144,7 +170,28 @@ export function LibraryPanel({ semanticScopeId, templates, onAddTemplate, onAddA
         <CaptionsPanel playerRef={playerRef} fps={fps} items={items} captionTracks={captionTracks} onSetCaptions={onSetCaptions} onUpdateCaptions={onUpdateCaptions} />
       ) : isTranscript ? (
         <div style={{ flex: 1, overflowY: 'auto', minHeight: 0, borderTop: `0.5px solid ${theme.border}` }}>
-          <TranscriptPanel playerRef={playerRef} fps={fps} items={items} trackOptions={trackOptions} onSetItemTranscript={onSetItemTranscript} onToggleWord={onToggleWord} onCleanScript={onCleanScript} onSetGapCap={onSetGapCap} onSetTranscriptPlayOrder={onSetTranscriptPlayOrder} onReorderTrackItems={onReorderTrackItems} onClearEdits={onClearEdits} onClearTranscript={onClearTranscript} onOpenCaptionStyles={captionTracks.length ? openCaptionStyles : undefined} />
+          <TranscriptPanel playerRef={playerRef} fps={fps} items={items} trackOptions={trackOptions} onSetItemTranscript={onSetItemTranscript} onToggleWord={onToggleWord} onCleanScript={onCleanScript} onSetGapCap={onSetGapCap} onSetTranscriptPlayOrder={onSetTranscriptPlayOrder} onReorderTrackItems={onReorderTrackItems} onClearEdits={onClearEdits} onClearTranscript={onClearTranscript} onImportSrt={(file) => { void importSrt(file); }} onOpenCaptionStyles={openCaptionStyles} />
+        </div>
+      ) : isSequences ? (
+        <div className="cc-sequence-panel">
+          <div className="cc-sequence-hint">
+            {t('点击把序列作为引用实例加入当前时间线；修改子序列会同步到所有实例。')}
+          </div>
+          <div className="cc-sequence-list">
+            {sequenceOptions.map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                disabled={!!option.disabledReason}
+                title={option.disabledReason}
+                onClick={() => onAddSequence(option.id)}
+                className="cc-sequence-row"
+              >
+                <span className="cc-sequence-name">{option.name}</span>
+                <span className="cc-sequence-duration">{(option.durationInFrames / fps).toFixed(1)}s</span>
+              </button>
+            ))}
+          </div>
         </div>
       ) : isMyAssets ? (
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, borderTop: `0.5px solid ${theme.border}` }}>

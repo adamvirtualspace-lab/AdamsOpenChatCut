@@ -8,6 +8,112 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased] / [未发布]
 
+### Added / 新增
+
+- Added first-class ChatGPT subscription sign-in for the built-in Agent through the official Codex CLI, including isolated credential storage, browser/device-code OAuth, account and model discovery, model-specific reasoning-effort selection, model switching, and dynamic OpenChatCut tool calling. Claude Code subscriptions remain available through the existing local MCP connection without exposing Claude OAuth credentials.
+  新增基于官方 Codex CLI 的内置 Agent ChatGPT 订阅登录：支持隔离凭据存储、浏览器/设备代码 OAuth、账号与模型发现、按模型选择推理强度、模型切换及 OpenChatCut 动态工具调用。Claude Code 订阅继续通过既有本机 MCP 连接使用，无需向 OpenChatCut 暴露 Claude OAuth 凭据。
+- Added first-class Ollama and LM Studio Agent providers with configurable local endpoints, optional API keys, model discovery, and explicit model activation.
+  新增 Ollama 与 LM Studio Agent 厂商：支持配置本地端点、可选 API Key、模型发现，并仅在明确保存模型后激活。
+- Added validated 4K video export across browser and server render paths, producing a 2160-pixel short edge (`3840×2160` for 16:9 projects) with matching bitrate and quality-check expectations.
+  新增经校验的 4K 成片导出，覆盖浏览器与服务端渲染链路；短边输出 2160 像素（16:9 工程为 `3840×2160`），并同步适配码率与质量检查预期。
+- Added professional timeline workflows: slip and rate-stretch modes, insert/overwrite placement, atomic multi-clip Inspector edits, nested sequences, source timecode, sync-lock groups, and persistent multicam range switching.
+  新增专业时间线工作流：滑移与比率拉伸模式、插入/覆盖落轨、多片段属性原子编辑、嵌套序列、源时间码、同步锁定组，以及可持久化的多机位区间切换。
+- Added durable generation and export jobs with refresh recovery, exact-first reruns, provider/reference preflight, editor-level background export state, cancellation, and structured terminal failures.
+  新增可恢复的生成与导出任务：支持刷新续跑、精确优先重跑、厂商/引用预检、编辑器级后台导出状态、取消及结构化终态错误。
+- Added scene-aware visual and spoken media search, source-versioned semantic artifacts, cached VAD evidence, immutable voice-isolation artifacts, and resumable AssemblyAI jobs.
+  新增镜头感知的视觉/口语素材搜索、按源版本管理的语义产物、VAD 证据缓存、不可变人声分离产物，以及可恢复的 AssemblyAI 任务。
+
+### Changed / 变更
+- Unified selectable creative workflows and bundled Agent skills around `SKILL.md` + `load_skill` progressive disclosure. External MCP clients can now load guidance without an edit session, and selected workflow bodies no longer occupy the cached system prompt.
+  统一可选创作工作流与内置 Agent Skill，改用 `SKILL.md` + `load_skill` 渐进披露；外部 MCP 客户端无需编辑会话即可加载指引，选中工作流的正文也不再占用系统提示缓存。
+- Unified timeline geometry around playback-rate-aware source-time/source-window helpers, with one transition-reconciliation pass shared by move, retime, split, trim, ripple, and overwrite operations.
+  统一采用感知播放速度的源时间/源窗口计算，并让移动、重定时、切分、裁剪、波纹和覆盖操作共用同一转场校正流程。
+- Made selected effect and transition previews use the same deterministic GL frame, progress, uniform, aspect, and color pipeline as export, with explicit fallback states when full parity is unavailable.
+  选中特效与转场的预览现在与导出共用确定性的 GL 帧、进度、uniform、画幅和色彩管线；无法完整对齐时会明确显示回退状态。
+
+- Virtualized large resource, media-pool, and timeline surfaces; thumbnails and media previews now activate only near the viewport or on hover, while timeline pointer work is frame-coalesced and magnetic snap points are cached for each gesture.
+  对大型资源库、素材池与时间线实施窗口化；缩略图和媒体预览仅在接近视口或悬停时激活，时间线指针更新按帧合并，磁吸点也按单次手势缓存。
+- Moved semantic duplicate detection into the existing worker with transferable typed vectors, and deferred Agent providers, tool executors, Google fonts, and the template compiler until their feature is used.
+  将语义重复检测移入现有 Worker 并使用可转移类型化向量；Agent 厂商、工具执行器、Google 字体与模板编译器也改为功能实际使用时才加载。
+- Bounded rebuildable browser/server caches and multipart sessions, added source-versioned preview derivatives and a cancellable preview-proxy queue, and kept user source media outside automatic eviction.
+  为可重建的浏览器/服务端缓存与分片上传会话增加边界，加入按源版本失效的预览派生文件及可取消的预览代理队列，并确保用户源媒体不参与自动淘汰。
+- Made editor panel geometry viewport-relative so browser zoom and window resizing preserve user-adjusted proportions, with compact container-driven layouts for dense controls.
+  将编辑器面板改为视口比例布局，使浏览器缩放和窗口尺寸变化时仍保留用户调整的区域比例，并为密集控件加入基于容器宽度的紧凑布局。
+- Reorganized the inspector into contextual Basic, Video, Audio, and Animation tabs; moved secondary media and timeline actions into compact menus, and made the asset action menu available from right-click.
+  将属性面板重组为按上下文启用的基础、视频、音频和动画标签；把次级素材与时间线操作收纳进紧凑菜单，并支持右键打开素材操作菜单。
+- Added deduplicated, retention-bounded automatic project versions after idle edits, at five-minute intervals, and before Agent-applied changes; manual named versions remain unbounded by automatic retention.
+  新增去重且有保留上限的自动工程版本：编辑空闲后、每五分钟以及 Agent 应用改动前自动留档；手动命名版本不受自动保留上限影响。
+- Added Auto, smaller-file, recommended, high-quality, and bounded custom video-bitrate controls across browser and server export paths.
+  为浏览器与服务端导出链路新增自动、小文件、推荐、高质量及带边界校验的自定义视频码率控制。
+- Clarified that inspector controls affect the selected timeline clip rather than its source media, and improved property hierarchy, numeric-field affordances, and keyframe-control states.
+  明确属性面板编辑的是当前时间线片段而非源素材，并优化属性层级、数值输入辨识度与关键帧控件状态。
+- Refined the export workbench with aligned parameter rows, restrained selected states, clearer format/codec language, and an output summary covering codec, dimensions, frame rate, bitrate, and filename.
+  优化导出工作台：统一参数行对齐与选中态，澄清格式/编码语义，并在输出摘要中展示编码、尺寸、帧率、码率与文件名。
+- Unified the Library panel tabs and nested-sequence list with compact typography, a restrained selection indicator, flat rows, and tabular duration metadata.
+  统一资源面板标签与嵌套序列列表的紧凑排版，加入克制的选中指示、扁平列表行及等宽时长信息。
+- Capped the Agent change-log dialog height and made its entry list independently scrollable with a fixed header and a scoped, visible scrollbar.
+  限制 Agent 修改记录弹窗的最大高度，并让记录列表在固定标题栏下独立滚动，同时提供仅作用于该列表的清晰滚动条。
+
+### Fixed / 修复
+
+- Fixed the Codex model selector disappearing after reopening Settings by keeping its picker mounted and automatically refreshing the signed-in account's model catalog.
+  修复重新打开设置后 Codex 模型选择器消失的问题：选择器现在会持续显示，并自动刷新已登录账号的模型目录。
+- Blocked Agent submission until the configured model catalog is hydrated, and retried one transient gateway/network failure only before any model output is emitted.
+  Agent 现在会等待模型目录加载并确认已有可用模型后才允许发送；仅在模型尚未输出任何内容时，对瞬时网关/网络故障安全重试一次。
+- Added BOM/CRLF-tolerant SRT import into independent named caption tracks, and streamed local ASR media from the server to AssemblyAI through a same-origin, JSON-only route without browser-side multi-gigabyte `Blob` materialization.
+  新增兼容 BOM、CRLF 的 SRT 导入并创建独立命名字幕轨；本地 ASR 素材改由仅接受同源 JSON 请求的服务端路由流式上传至 AssemblyAI，避免浏览器构造数 GB `Blob`。
+- Made editor panel dividers keyboard-focusable and arrow-key resizable while preserving compact responsive timeline controls without overlap.
+  编辑器面板分隔条现可键盘聚焦并使用方向键调整大小，同时保持紧凑响应式时间线控件互不遮挡。
+- Moved rendered frame files out of Chat Completions tool-result text and into native vision messages across OpenAI and compatible providers, preventing base64 payloads from exhausting the model context window during multi-step Agent edits; compatible models that reject visual input retry once with bounded text-only metadata.
+  OpenAI 及兼容 Provider 的 Chat Completions 模式下，渲染帧文件不再作为工具结果文本传递，而会转换为原生视觉消息，避免多步 Agent 编辑因 Base64 内容撑爆模型上下文窗口；兼容模型若拒绝视觉输入，会使用有界纯文本元数据安全重试一次。
+- Aligned server-export media materialization with the renderer-visible timeline closure, isolated the browser editor bridge behind a process-local credential, and bounded generated-result header and idle-body waits so stalled providers remain recoverable.
+  服务端导出媒体物化现与渲染器可见时间线闭包一致；浏览器编辑器桥改用进程内独立凭据；生成结果下载也加入响应头与正文空闲截止时间，使厂商卡死时任务仍可恢复。
+- Made browser/server export cancellation reach the encoder, renderer, and destination writer while preserving an already committed success; restored jobs now terminalize safely and use registered cleanup policies instead of unlinking untrusted result paths.
+  让浏览器端与服务端导出取消信号贯穿编码器、渲染器和目标写入器，同时不再用迟到取消覆盖已提交成功；恢复任务会安全进入终态，并只通过已注册清理策略处理结果，不再删除不可信路径。
+- Made linked audio/video overwrite and split operations atomic, preserved transitions outside punched holes, validated transitions as unique binary seams, and corrected edited-transcript audio slip coordinates.
+  将关联音视频的覆盖与切分改为原子操作，保留切洞外侧转场，把转场限制为唯一二元接缝，并修正编辑式转录音频的滑移坐标域。
+- Hardened asynchronous voice isolation, multicam sync, generation, and media-derivative commits with live project/item/source revision checks and durable semantic operation IDs.
+  为异步人声分离、多机位同步、生成和媒体派生提交加入实时工程、片段、源版本复核及持久语义 operation ID，避免重链或并发编辑后迟到结果回写。
+- Made project-package publication transactional across browser and server storage, rejected HTML media fallbacks and cross-frame-rate nested sequences before export, and isolated a single MCP call cancellation from unrelated bridge calls.
+  将工程包发布改为跨浏览器与服务端存储的事务流程；在导出前拒绝 HTML 媒体回退及跨帧率嵌套序列；单个 MCP 调用取消也不再级联终止同一桥上的无关调用。
+- Restored cloud-only upload media from R2 before export, serialized concurrent hydrations, rejected HTML/non-media responses, and routed all remote probes through DNS/IP/redirect-pinned public fetches to block SSRF and rebinding.
+  导出前可从 R2 恢复仅存在云端的上传素材，并串行合并同名并发回源；同时拒绝 HTML/非媒体响应，且所有远程探测都经过 DNS、IP、重定向与地址固定校验，阻断 SSRF 与 DNS 重绑定。
+- Made ASR jobs unique by asset/revision/generation, prevented progressive import callbacks from double-submitting paid transcription, and kept stale transcripts reviewable without letting them drive playback, export, search, or edits.
+  按素材、源版本和 generation 唯一协调 ASR，避免渐进导入回调重复提交付费转录；旧转录仍可审阅，但不再参与播放、导出、搜索或编辑。
+- Corrected rational source-timecode conversion, playback-rate-aware multicam sync, and GL transition endpoint sampling; multicam now rejects mixed rates atomically and transition progress deterministically reaches both 0 and 1.
+  修正有理数源时间码换算、感知播放速度的多机位同步及 GL 转场端点采样；多机位会原子拒绝混合速度，转场进度也确定性覆盖 0 与 1。
+- Hardened project-index writes, MCP runtime hydration, durable open-job retention, and multi-result generation checkpoints so metadata cannot be lost, old bridges cannot overwrite new state, resumable work is never evicted, and partial Seedance/Mureka outputs cannot be published as complete.
+  加固工程索引写入、MCP runtime hydration、未结束任务保留及多结果生成检查点，避免元数据丢失、旧桥覆盖新状态、可恢复任务被淘汰，以及 Seedance/Mureka 部分结果被误判为完成。
+
+- Fixed Chromium export destination selection by using the save-file picker for single-file exports, reserving the directory picker for multi-file bundles, and invalidating stale file handles when the output filename changes.
+  修复 Chromium 导出位置选择：单文件导出改用文件保存选择器，多文件打包才使用目录选择器，并在输出文件名变化时清除旧文件句柄。
+- Serialized project saves through immutable snapshots, added close/switch flush barriers, and blocked destructive navigation after persistence failures.
+  通过不可变快照串行化工程保存，加入关闭/切换前 flush 屏障，并在持久化失败后阻止破坏性导航。
+- Rejected stale derived-media commits after relink, bound semantic/blob/ASR/generation outputs to source revisions, and staged project-package publication so failed imports never expose half-written projects.
+  重链后拒绝旧派生产物回写，将语义、Blob、ASR 和生成结果绑定到源版本，并通过工程包分阶段发布避免失败导入暴露半成品。
+- Bound MCP sessions to project/editor revisions, canceled queued and in-flight calls on timeout or transport close, and pruned expired sessions before request dispatch.
+  将 MCP 会话绑定到工程/编辑器版本；超时或传输关闭时同时取消排队与执行中的调用，并在请求分发前清理过期会话。
+- Preserved the committed revision across deferred React state updates so external MCP clients can observe `applied`, and rejected every cross-transport tool call carrying another client's `editSessionId`.
+  在 React 延迟提交工程状态时保留真实已提交 revision，使外部 MCP 客户端可正确读到 `applied`；同时拒绝所有携带其他客户端 `editSessionId` 的跨传输工具调用。
+- Added browser and server export-media preflight so missing media, invalid blob/local references, and nested-sequence errors fail before queueing or rendering.
+  新增浏览器端与服务端导出媒体预检，使缺失素材、无效 Blob/本地引用及嵌套序列错误在排队或渲染前失败。
+- Fixed preview stalls at transition boundaries by preserving the incoming media element after the transition completes instead of remounting and re-seeking it.
+  修复预览在转场边界卡顿的问题：转场结束后保留已在播放的入场媒体元素，不再重新挂载并跳转。
+- Balanced fixed-size resource-grid columns across the available panel width instead of leaving a large unused strip at the right edge.
+  将固定尺寸的资源卡片列均匀分布到面板可用宽度，不再在网格右侧留下大块空白。
+- Standardized timeline toolbar control spacing on a shared four-pixel rhythm while preserving clear separation between editing-tool groups.
+  统一时间线工具栏控件的四像素间距节奏，同时保留编辑工具组之间的清晰分隔。
+- Replaced duplicate two-line timeline track badges and names with one compact highlighted label: “视频1”/“字幕1” in Chinese and “V1”/“C1” in English.
+  将时间线轨道头重复的两行徽章与名称合并为单个紧凑高亮标签：中文显示“视频1”“字幕1”，英文显示“V1”“C1”。
+- Rounded variable-speed values for display and matched presets with a tolerance, preventing IEEE-754 noise such as `1.0000000000000004×` from leaking into clip context menus.
+  对变速值进行显示舍入并以容差匹配预设，避免 `1.0000000000000004×` 等 IEEE-754 浮点噪声出现在片段右键菜单中。
+- Serialized concurrent version mutations, retried failed automatic captures without dropping newer queued snapshots, and required a successful pre-change snapshot plus revision check before internal Agent edits are applied.
+  串行化并发版本写入；自动留档失败后保留重试状态且不丢失已排队的新快照；内置 Agent 仅在修改前快照成功且工程版本未变化时才应用改动。
+- Preserved requested bitrates during VP8/H.264 FPS retiming, including software-encoder fallback.
+  在 VP8/H.264 帧率转换及软件编码回退中保留用户请求的码率。
+- Kept compact media menus inside the viewport at narrow panel widths and completed keyboard focus, dismissal, and inspector-tab semantics for the reorganized controls.
+  在窄面板下将紧凑素材菜单限制在视口内，并补全重组控件的键盘焦点、关闭行为与属性标签语义。
+
 ## [0.1.7] - 2026-07-29
 
 ### Added / 新增

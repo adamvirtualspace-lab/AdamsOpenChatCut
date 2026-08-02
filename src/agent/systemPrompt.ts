@@ -2,9 +2,9 @@
 // Authored in-house, grounded in the bundled skills + tool model.
 import { GENERATE_WORKFLOW } from './tools/generate-tools';
 import { timelineTrackIds, trackAlias, trackKind, type DesignStyle } from '../editor/types';
-import { type CreativeSkill } from './skills/skills-catalog';
+import type { SkillDefinition } from './skills/skill-types';
 import type { AgentContext } from './context';
-import { getLocale } from '../i18n/locale';
+import type { Locale } from '../i18n/locale';
 
 // <editor_state>: Timeline snapshot of each message, spelled into system,
 // The agent will see the timeline when it starts, there is no need to adjust read_timeline first. Keep it compact: no props/transition details,
@@ -25,16 +25,9 @@ export function assembleSystemPrompt(stable: readonly string[], volatilePart: st
   return stable.join('') + volatilePart;
 }
 
-/** The reply language, stated explicitly.
- *
- * The prompt itself is deliberately English-only and outside i18n, but "reply in
- * the user's language" is not a usable instruction for a model whose default is
- * Chinese — it answered in Chinese to English questions. The UI locale is the
- * one signal we actually have about what the user reads, so name the language. */
-export function replyLanguagePrompt(): string {
-  return getLocale() === 'en'
-    ? '\n# Language\nAlways reply in English, including edit summaries and proposal descriptions, regardless of the language of tool output or the media being edited.\n'
-    : '\n# Language\n始终用简体中文回复，包括编辑摘要与提案说明。\n';
+export function agentLanguagePrompt(locale: Locale): string {
+  const language = locale === 'zh' ? 'Chinese' : 'English';
+  return `\n\n# Response Language\nThe interface language is ${language}. Write all user-facing responses, questions, summaries, and generated editing instructions in ${language}.`;
 }
 
 export function editorStatePrompt(ctx: AgentContext): string {
@@ -70,20 +63,18 @@ export function editorStatePrompt(ctx: AgentContext): string {
   ].join('\n');
 }
 
-// A selected creative mode injects that skill's instructions
-// (bodyMarkdown) into the system prompt so the agent plans/executes per the skill.
-// No skill selected → empty string (general agent).
-export function creativeModePrompt(skill: CreativeSkill | undefined): string {
+// A selected skill contributes only a stable loader instruction. Its body remains
+// out of the cached system prompt and is disclosed through load_skill on demand.
+export function creativeModePrompt(skill: SkillDefinition | undefined): string {
   if (!skill) return '';
-  // Skill attachment plus body injection.
+  const reference = skill.source === 'custom' ? skill.id : skill.slug;
   return [
     '',
-    `The user explicitly selected the Skill "${skill.name}" (${skill.id}) for this message. Load this Skill before handling the user's request.`,
-    '',
-    `# Creative mode: ${skill.name} (${skill.nameZh})`,
-    'The user selected this creative mode for the project. Plan and execute according to the skill instructions below. They guide your reasoning and workflow without changing the available tools:',
-    '',
-    skill.body,
+    '<selected_skill>',
+    `The user explicitly selected Skill "${reference}" for this message.`,
+    `Before taking action, call load_skill with name="${reference}" and follow the returned workflow.`,
+    'Do not infer the workflow from the skill name or prior messages.',
+    '</selected_skill>',
   ].join('\n');
 }
 
@@ -151,7 +142,7 @@ Do not spam: at most one report per distinct friction incident per turn.
 - Every clip has an id, track, startFrame, durationInFrames, and editable props such as text and colors.
 
 # Workflow
-1. <editor_state> provides the current timeline snapshot; work from it directly. **Every mutating tool returns a changed diff** containing clips, shifted ripple rules {track,fromFrame,by,count}, removedItemIds, createdTracks, and notes. Use it to update your working timeline model. **Do not repeatedly call read_project between your own consecutive edits.** Reread only when notes request it or an error suggests stale state. Use read_timeline for props or transition details. Before adding an item, use list_templates to inspect available templates.
+1. <editor_state> provides the current timeline snapshot; work from it directly. **Every mutating tool returns a changed diff** containing final clip placements, contiguous shifted ranges {track,fromFrame,by,count}, typed before/after item or transition changes, removedItemIds, createdTracks, and notes. Non-contiguous moves retain item IDs. Use the diff to update your working timeline model. **Do not repeatedly call read_project between your own consecutive edits.** Reread only when notes request it or an error suggests stale state. Use read_timeline for full details. Before adding an item, use list_templates to inspect available templates.
 2. Edit with tools such as add_motion_graphic, update_item_props, move_item, split_item, and remove_item.
 3. Reference clips by ids returned from read_timeline; unique id prefixes are accepted.
 4. If the library has no suitable template, use **submit_motion_graphic**(prompt,name) to create a new motion graphic in the media pool, then use edit_item to place it. create_motion_graphic is an alias. Prefer library templates.
@@ -161,6 +152,7 @@ Do not spam: at most one report per distinct friction incident per turn.
 # End-to-end tool routing
 - Tool schemas are authoritative. Use ToolSearch for uncommon operations instead of guessing a name or forcing a generic edit tool.
 - **Ingest and understand:** import or download media → probe_media / view_asset_frames / read_transcript → wait for transcription when needed. For rough cuts, use detect_scenes, find_highlights, multicam_sync, and change_cam before transcript or clip-level edits.
+- **Plan review:** for a multi-scene visual plan, review_scene_plan can surface repetition and vague scene responsibilities before generation. It is optional advice, not a prerequisite; use its findings as revision guidance.
 - **Edit and recover:** use edit_asset for media-pool metadata/content, edit_item or the focused timeline tools for placed clips, duplicate_item only when a real copy is needed, manage_markers for annotations, and undo_last_change to recover the previous project snapshot. clear_timeline is destructive and requires an explicit request.
 - **Reformat and brand:** manage_design_style → manage_timelines or set_aspect_ratio → auto_reframe / apply_layout → library, captions, effects, fonts, and update_watermark. Verify visual changes with timeline frames.
 - **Package reusable work:** manage_template handles project templates; manage_skill and load_skill handle reusable workflows. For baked motion graphics, convert_motion_graphic_to_video → register_converted_video, or export_motion_graphic_prores when alpha-capable ProRes is required.
@@ -238,6 +230,7 @@ Required pattern: **browse_library to discover an id, then edit_item to place it
 - **Transitions:** adds:[{type:"transition", assetId:"builtin:tr-cross-dissolve", incomingItemId}]. incomingItemId is the clip after the cut and requires an adjacent preceding clip on the same track.
 - **MG**: adds:[{type:"motion-graphic", assetId:"library:motion-graphic:<id>", track?, startFrame?}]
 - **Library audio:** adds:[{type:"audio", assetId:"library:sound:<id>", fromFrame?}]
+- **Slip:** updates:[{operation:"slip", itemId, deltaInFrames}] moves the video/audio source window without changing its timeline start, duration, or track. Positive deltas move later; boundary requests clamp and report the applied delta.
 - updates/deletes change parameters or remove entries. The compatibility shortcut manage_effects covers only the effect/LUT stack.
 - Color properties use 0..1 RGB arrays. After editing, verify with view_timeline_frames.
 
@@ -265,6 +258,7 @@ Required pattern: **browse_library to discover an id, then edit_item to place it
 - **Do not infer asset contents from filenames.** Inspect visuals with view_asset_frames and speech with find_transcript before drawing conclusions.
 
 # Visual understanding and verification
+- **Unified retrieval:** use search_media when discovering project footage by visual concept and/or spoken phrase. It returns separately ranked visual/spoken hits with source time ranges and excludes stale source revisions; inspect the chosen range before editing.
 - **Source selection:** view_asset_frames(assetId, sourceTimesMs? | count?/fromSeconds?/toSeconds?) inspects **raw media-pool footage**, not the timeline. For long media, start with count=12 for a contact-sheet scan, then narrow the range. /media/uploads uses ffmpeg; browser frame extraction may inspect a blob placeholder while upload is in progress.
 - **Timeline verification:** after visual edits such as motion graphics, text, transitions, zoom, filters, aspect ratio, or captions, use view_timeline_frames to **visually confirm** the composite, including uncommitted drafts. Multiple frames are combined into a labeled contact sheet.
 - **Early transcription:** once the audio/video master lands, ingest immediately extracts 64k audio and starts ASR without waiting for proxy transcode. track_progress target=transcription still applies.

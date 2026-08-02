@@ -1,6 +1,7 @@
-import type { AgentToolSchema } from '../tool-schema';
+export { TIMELINE_TOOL_SCHEMAS, TIMELINE_TOOL_NAMES } from './schemas/timeline-tools';
 import type { AgentContext } from '../context';
-import { ASPECT_PRESETS, ratioLabel, timelineDuration, type AspectFit, type ProjectDoc, type Timeline } from '../../editor/types';
+import { ASPECT_PRESETS, ratioLabel, type AspectFit, type ProjectDoc, type Timeline } from '../../editor/types';
+import { resolveTimelineRenderPlan, sequenceReferenceError, sequenceReferencesTo, type SequenceReference } from '../../editor/sequenceGraph';
 
 // manage_timelines — ONE action-based tool, not separate create/switch tools.
 // Mutating actions flow through propose→apply via the project-level draft;
@@ -9,33 +10,6 @@ import { ASPECT_PRESETS, ratioLabel, timelineDuration, type AspectFit, type Proj
 // these tools always operate on the open project.
 
 type Args = Record<string, unknown>;
-
-export const TIMELINE_TOOL_SCHEMAS: AgentToolSchema[] = [
-  {
-    name: 'manage_timelines',
-    description:
-      'Manage the project\'s timelines (sequences): list, create, duplicate, switch, update (rename / resize canvas / hide), delete. Each timeline has its own canvas (width×height / ratio) — duplicate + update ratio="9:16" is the long-to-short workflow. switch makes a timeline active: later tool calls this turn and the user\'s editor view follow it.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        action: { type: 'string', enum: ['list', 'create', 'duplicate', 'switch', 'update', 'delete'], description: 'What to do.' },
-        timelineId: { type: 'string', description: 'Target timeline id (prefix ok). Required for duplicate/switch; update defaults to the active timeline.' },
-        timelineIds: { type: 'array', items: { type: 'string' }, description: 'delete: several timeline ids (prefixes ok).' },
-        name: { type: 'string', description: 'create/duplicate: the new timeline\'s name; update: rename.' },
-        ratio: { type: 'string', enum: ['16:9', '9:16', '1:1', '4:3', '3:4'], description: 'Canvas aspect preset (create/update). Use ratio OR explicit width+height, not both.' },
-        width: { type: 'integer', description: 'Explicit canvas width px (create/update, omit when ratio is given).' },
-        height: { type: 'integer', description: 'Explicit canvas height px (create/update, omit when ratio is given).' },
-        fit: { type: 'string', enum: ['contain', 'cover'], description: 'update: how existing clips adapt to the new canvas — contain letterboxes, cover fills+crops.' },
-        hidden: { type: 'boolean', description: 'update: hide (true) or restore (false) the timeline tab; data is kept. The last visible timeline cannot be hidden.' },
-        activate: { type: 'boolean', description: 'create/duplicate: false keeps the current timeline active (default true; batch create activates the last entry).' },
-        timelines: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, ratio: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' } } }, description: 'create: several timelines at once, each {name, ratio | width+height}.' },
-      },
-      required: ['action'],
-    },
-  },
-];
-
-export const TIMELINE_TOOL_NAMES = new Set(TIMELINE_TOOL_SCHEMAS.map((t) => t.name));
 
 /** ratio preset OR explicit width/height → canvas dims (null = nothing requested) */
 function resolveDims(a: { ratio?: unknown; width?: unknown; height?: unknown }): { width: number; height: number } | null | { error: string } {
@@ -58,7 +32,9 @@ function findTimeline(doc: ProjectDoc, id: unknown): Timeline | null {
 const describe = (t: Timeline, doc: ProjectDoc) => ({
   id: t.id, name: t.name, width: t.width, height: t.height, ratio: ratioLabel(t.width, t.height),
   active: t.id === doc.activeTimelineId, hidden: t.hidden ?? false,
-  clips: t.items.length, durationInFrames: timelineDuration(t),
+  clips: t.items.length,
+  nestedInstances: t.items.filter((item) => item.kind === 'sequence').length,
+  durationInFrames: resolveTimelineRenderPlan(doc, t.id).durationInFrames,
 });
 
 export async function execTimelineTool(name: string, args: Args, ctx: AgentContext): Promise<unknown> {
@@ -135,22 +111,50 @@ export async function execTimelineTool(name: string, args: Args, ctx: AgentConte
       return { ok: true, changed, timeline: updated ? describe(updated, after) : t.id };
     }
 
+    case 'insert': {
+      const target = findTimeline(doc, args.timelineId);
+      if (!target) return { error: `no timeline ${args.timelineId}`, available: doc.timelines.map((t) => ({ id: t.id, name: t.name })) };
+      const owner = findTimeline(doc, doc.activeTimelineId);
+      if (!owner) return { error: `no active timeline ${doc.activeTimelineId}` };
+      const referenceError = sequenceReferenceError(doc, owner.id, target.id);
+      if (referenceError) return { error: referenceError.message, sequenceError: referenceError.toJSON() };
+      const addResult = ctx.commands.addSequence(target.id, {
+        track: typeof args.track === 'string' ? args.track : undefined,
+        startFrame: typeof args.startFrame === 'number' ? Math.max(0, Math.round(args.startFrame)) : undefined,
+        sourceStartFrame: typeof args.sourceStartFrame === 'number' ? Math.max(0, Math.round(args.sourceStartFrame)) : undefined,
+        sourceDurationInFrames: typeof args.sourceDurationInFrames === 'number' ? Math.max(1, Math.round(args.sourceDurationInFrames)) : undefined,
+        playbackRate: typeof args.playbackRate === 'number' ? args.playbackRate : undefined,
+      });
+      if (!addResult.ok) {
+        return {
+          error: addResult.error,
+          ...(addResult.sequenceError ? { sequenceError: addResult.sequenceError } : {}),
+        };
+      }
+      const itemId = addResult.itemId;
+      const instance = ctx.getState().items.find((item) => item.id === itemId);
+      return { ok: true, item: instance ?? { id: itemId, timelineId: target.id } };
+    }
+
     case 'delete': {
       const ids = Array.isArray(args.timelineIds) && args.timelineIds.length ? args.timelineIds : [args.timelineId];
       const deleted: string[] = [];
       const kept: string[] = [];
+      const blocked: Array<{ timeline: string; references: SequenceReference[] }> = [];
       for (const raw of ids) {
         const cur = ctx.getDoc();
         const t = findTimeline(cur, raw);
         if (!t) { kept.push(String(raw)); continue; }
         if (cur.timelines.length <= 1) { kept.push(t.name); continue; } // keep ≥1 (reducer guards too)
+        const references = sequenceReferencesTo(cur, t.id);
+        if (references.length) { kept.push(t.name); blocked.push({ timeline: t.id, references }); continue; }
         ctx.commands.deleteTimeline(t.id);
         deleted.push(t.name);
       }
-      return { ok: deleted.length > 0, deleted, ...(kept.length ? { kept, note: '至少保留一条序列/未找到的已跳过' } : {}) };
+      return { ok: deleted.length > 0, deleted, ...(kept.length ? { kept, note: '至少保留一条序列、被嵌套实例引用或未找到的已跳过' } : {}), ...(blocked.length ? { blocked } : {}) };
     }
 
     default:
-      return { error: `unknown action ${args.action}（可选 list/create/duplicate/switch/update/delete）` };
+      return { error: `unknown action ${args.action}（可选 list/create/duplicate/switch/update/delete/insert）` };
   }
 }

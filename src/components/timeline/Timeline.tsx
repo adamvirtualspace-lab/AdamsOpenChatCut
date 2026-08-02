@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { PlayerRef } from '@remotion/player';
 import { theme, themeAlpha } from '../../theme';
 import {
@@ -6,6 +6,7 @@ import {
   type TimelineItem, type TimelineState, type TrackId,
 } from '../../editor/types';
 import type { EditorCommands } from '../../editor/store';
+import { slipPreview as buildSlipPreview, type SlipPreview } from '../../editor/slip';
 import { usePersistedState } from '../../hooks/usePersistedState';
 import { ClipContextMenu, type FxClip } from './ClipContextMenu';
 import { Icon } from '../icons';
@@ -29,12 +30,12 @@ import { usePlayheadPaint } from './usePlayheadPaint';
 import { useTimelineZoomController } from './useTimelineZoomController';
 import { applyLibraryToClip as applyToClip, applyLibraryToTrack as applyToTrack } from './libraryDropActions';
 import {
-  HEADER_W, MAX_ROW, MIN_ROW, RULER_H, TRACK_ROW,
-  rulerMajorSeconds, rulerMinorCount, type EditMode,
+  HEADER_W, MAX_ROW, MIN_ROW, RULER_H, TRACK_ROW, buildTimelineIndexes,
+  rulerMajorSeconds, rulerMinorCount, timelineFrameWindow, timelinePinnedItemIds, type EditMode,
 } from './timelineUtil';
 import type { LibraryDragPayload } from '../../library/drag';
 import { useSelectionRefMode } from '../../agent/selection-refs';
-import { useT } from '../../i18n/locale';
+import { getLocale, useT } from '../../i18n/locale';
 import type { TimelineShortcutApi } from '../../shortcuts/timelineApi';
 
 interface TimelineProps {
@@ -48,18 +49,26 @@ interface TimelineProps {
   /** Filled by Timeline so Editor can bind the global shortcut dispatcher. */
   shortcutApiRef?: RefObject<TimelineShortcutApi | null>;
   onReviewItem?: (request: { itemId: string; frame: number; clientX: number; clientY: number }) => void;
+  onSlipPreview?: (preview: SlipPreview | null) => void;
 }
 
-export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceover, shortcutApiRef, onReviewItem }: TimelineProps) {
+export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceover, shortcutApiRef, onReviewItem, onSlipPreview }: TimelineProps) {
   const t = useT();
+  const locale = getLocale();
   const empty = state.items.length === 0;
+  const liveStateRef = useRef(state);
+  liveStateRef.current = state;
   const total = empty ? 0 : timelineDuration(state);
   const trackIds = timelineTrackIds(state);
+  const indexes = useMemo(
+    () => buildTimelineIndexes(state),
+    [state.items, state.transitions],
+  );
   const innerRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const timelineId = (state as { id?: string }).id;
   const { zoom, setZoom, zoomBy, fitToView, pixelsPerFrame: px, trackScale } =
-    useTimelineZoomController({ scrollRef, totalFrames: total, fps: state.fps, timelineId });
+    useTimelineZoomController({ scrollRef, totalFrames: total, fps: state.fps, projectId, timelineId });
   const metaOf = (id: TrackId) => {
     const kind = trackKind(state, id);
     const color = kind === 'caption' ? theme.trackCaption
@@ -69,7 +78,7 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
   };
   // Playhead drawing machine: rAF frame direct drawing + Player watchdog + breakpoint resume (usePlayheadPaint)
   const { playheadRef, playheadLineRef, toolbarTimecodeRef, rulerTimecodeRef, paintPlayhead, playing } =
-    usePlayheadPaint({ playerRef, projectId, fps: state.fps, total, px });
+    usePlayheadPaint({ playerRef, projectId, timelineId, fps: state.fps, total, px });
   // editing mode (Selection V / Blade B / Trim N / Pen P). selection =
   // drag/move; blade = click a clip to cut it there; trim = edge-trim ripples
   // following clips; pen = draw opacity keyframes on the selected clip.
@@ -183,20 +192,35 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
     try { const src = await bakeClipToVideo(state, it); commands.replaceItemMedia(it.id, src); setClipJob(null); }
     catch (e) { setClipJob({ msg: e instanceof Error ? e.message : t('转换失败'), error: true }); }
   };
-  const [availW, setAvailW] = useState(0);
+  const [viewport, setViewport] = useState({ scrollLeft: 0, clientWidth: 0 });
   // content is at least as wide as the panel, so track rows/ruler never stop
   // short of the right edge when the project is short or zoomed out.
-  const innerW = Math.max(HEADER_W + total * px + 240, availW);
-
-  useEffect(() => {
+  const innerW = Math.max(HEADER_W + total * px + 240, viewport.clientWidth);
+  useLayoutEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const measure = () => setAvailW(el.clientWidth);
+    let raf = 0;
+    const measure = () => {
+      raf = 0;
+      const next = { scrollLeft: el.scrollLeft, clientWidth: el.clientWidth };
+      setViewport((current) => current.scrollLeft === next.scrollLeft
+        && current.clientWidth === next.clientWidth ? current : next);
+    };
+    const schedule = () => { if (!raf) raf = requestAnimationFrame(measure); };
     measure();
-    const ro = new ResizeObserver(measure);
+    const ro = new ResizeObserver(schedule);
     ro.observe(el);
-    return () => ro.disconnect();
+    el.addEventListener('scroll', schedule, { passive: true });
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      ro.disconnect();
+      el.removeEventListener('scroll', schedule);
+    };
   }, []);
+  const visibleWindow = useMemo(
+    () => timelineFrameWindow(viewport.scrollLeft, viewport.clientWidth, px),
+    [px, viewport.clientWidth, viewport.scrollLeft],
+  );
 
   // equal-height tracks; scale via Alt+wheel. (collapse UI removed — always full row)
   // Duck role is set via agent edit_track / track menu — not permanent track-header widgets.
@@ -210,7 +234,6 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
   const minorFrames = Math.max(1, Math.round(majorFrames / minorDivs));
   const minorTicksPerMajor = Math.max(1, Math.round(majorFrames / minorFrames) - 1);
   const rulerSpanFrames = Math.max(total, Math.ceil((innerW - HEADER_W) / Math.max(px, 0.001)));
-  const majorCount = Math.ceil(rulerSpanFrames / majorFrames) + 1;
 
   const frameFromClientX = (clientX: number): number => {
     const r = innerRef.current?.getBoundingClientRect();
@@ -233,7 +256,15 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
     state, commands, editMode, snapping, pickMode, px,
     playheadRef, scrollRef, frameFromClientX, trackFromClientY, itemsInMarquee,
   });
-  const { drag, marquee, pickDrag, startPick, onPointerMove, onPointerUp } = pointer;
+  const { drag, marquee, pickDrag, startPick, onPointerMove, onPointerUp, onPointerCancel } = pointer;
+  const activeSlipPreview = useMemo(
+    () => drag?.mode === 'slip' ? buildSlipPreview(state, drag.id, drag.deltaF) : null,
+    [drag, state],
+  );
+  useEffect(() => {
+    onSlipPreview?.(activeSlipPreview);
+  }, [activeSlipPreview, onSlipPreview]);
+  useEffect(() => () => onSlipPreview?.(null), [onSlipPreview]);
 
   /** library resource dropped on a clip (fx/lut/zoom/transition) or track (sound/mg) */
   const [libDropTarget, setLibDropTarget] = useState<string | null>(null);
@@ -244,11 +275,17 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
     window.setTimeout(() => setClipJob((cur) => (cur && cur.msg === msg && !cur.error ? null : cur)), 3000);
   };
 
-  const dropCtx = { state, commands, notice: dropNotice };
+  const dropCtx = {
+    state,
+    commands,
+    notice: dropNotice,
+    getState: () => liveStateRef.current,
+    getAssets: () => liveStateRef.current.assets ?? [],
+  };
   const applyLibraryToClip = (payload: LibraryDragPayload, item: TimelineItem): boolean =>
     applyToClip(dropCtx, payload, item);
   const applyLibraryToTrack = (payload: LibraryDragPayload, trackId: TrackId, startFrame: number): boolean =>
-    applyToTrack(dropCtx, payload, trackId, startFrame, placeMode === 'insert');
+    applyToTrack(dropCtx, payload, trackId, startFrame, placeMode === 'insert', placeMode === 'overwrite');
 
   const seekTo = (clientX: number) => {
     const f = Math.max(0, Math.min(frameFromClientX(clientX), total - 1));
@@ -276,6 +313,14 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
   });
 
   const editing = markers.find((m) => m.id === editMarker) ?? null;
+  const pinnedItemIds = useMemo(() => timelinePinnedItemIds(
+    selectedIdsOf(state),
+    [drag?.id, pointer.penDrag?.itemId, ctxMenu?.id, libDropTarget, pickDrag?.item?.id],
+    state.transitions ?? [],
+  ), [
+    ctxMenu?.id, drag?.id, libDropTarget, pickDrag?.item?.id, pointer.penDrag?.itemId,
+    state.selectedId, state.selectedIds, state.transitions,
+  ]);
 
   return (
     <section className="cc-timeline" style={{ flex: 1, borderLeft: `0.5px solid ${theme.border}`, background: theme.bg, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden', position: 'relative' }}>
@@ -303,17 +348,20 @@ export function Timeline({ state, commands, playerRef, projectId, onRecordVoiceo
 
       {/* scrollable ruler + tracks (playhead spans both). Ctrl/⌘+wheel = time
           zoom at cursor, Alt+wheel = track-height zoom (native listener above). */}
-      <div ref={scrollRef} style={{ overflow: 'auto', flex: 1, minHeight: 0 }} onPointerMove={onPointerMove} onPointerUp={onPointerUp}
+      <div ref={scrollRef} style={{ overflow: 'auto', flex: 1, minHeight: 0 }}
+        onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}
         title={t('Ctrl/⌘+滚轮 缩放时间轴 · Alt+滚轮 缩放轨道高度')}>
         <div ref={innerRef} style={{ position: 'relative', width: innerW }}>
           {/* ruler (click to seek, hold to scrub; selection mode: click = timepoint, drag = timerange).
 The playhead line/triangle is pointerEvents:none, click it to click the ruler - scrub the same path to take effect.*/}
           <TimelineRuler
             state={state} empty={empty} px={px}
-            majorCount={majorCount} majorFrames={majorFrames} minorFrames={minorFrames} minorTicksPerMajor={minorTicksPerMajor}
+            majorFrames={majorFrames} minorFrames={minorFrames} minorTicksPerMajor={minorTicksPerMajor}
+            rulerEndFrame={rulerSpanFrames} visibleWindow={visibleWindow}
             pickMode={pickMode} startPick={startPick} seekTo={seekTo}
             rulerTimecodeRef={rulerTimecodeRef} playheadFrame={playheadRef.current}
             zoneIn={zoneIn} zoneOut={zoneOut} markers={markers} onEditMarker={setEditMarker}
+            pinnedMarkerId={editMarker}
           />
 
           {/* tracks */}
@@ -322,21 +370,21 @@ The playhead line/triangle is pointerEvents:none, click it to click the ruler - 
             const alias = trackAlias(state, trackId);
             const config = state.tracks?.[trackId] ?? {};
             const trackCaptions = meta.kind === 'caption' ? captionsOnTrack(state, trackId) : null;
-            const items = state.items.filter((it) => it.track === trackId);
-            const dragIsAudio = drag ? state.items.find((it) => it.id === drag.id)?.kind === 'audio' : false;
+            const items = indexes.itemsByTrack.get(trackId) ?? [];
+            const dragIsAudio = drag ? indexes.itemById.get(drag.id)?.kind === 'audio' : false;
             const isDropTarget = drag?.mode === 'move' && drag.targetTrack === trackId && meta.kind === (dragIsAudio ? 'audio' : 'video') && !state.tracks?.[trackId]?.locked;
             const hidden = meta.kind === 'caption' ? !trackCaptions?.enabled : config.hidden ?? false;
             const headConfig = meta.kind === 'caption' ? { ...config, hidden } : config;
             const locked = config.locked ?? false;
             const kindLabel = meta.kind === 'video' ? '视频' : meta.kind === 'audio' ? '音频' : '字幕';
-            const trackName = config.name || `${t(kindLabel)} ${alias.slice(1)}`;
+            const trackName = config.name || (locale === 'en' ? alias : `${t(kindLabel)}${alias.slice(1)}`);
             // Caption data does not count as content — see reduce.ts track.delete.
             const busy = items.length > 0
-              || (state.transitions ?? []).some((transition) => transition.trackId === trackId);
+              || (indexes.transitionsByTrack.get(trackId)?.length ?? 0) > 0;
             return (
               <div key={trackId} className="cc-track-row" style={{ height: rowHeightOf(trackId), background: isDropTarget ? `color-mix(in srgb, ${theme.success} 15%, ${theme.bg})` : undefined }}>
                 <TrackHead
-                  trackId={trackId} kind={meta.kind} alias={alias} trackName={trackName} config={headConfig}
+                  trackId={trackId} kind={meta.kind} trackName={trackName} config={headConfig}
                   busy={busy} menuElevated={captionMenu?.id === trackId || duckMenu?.id === trackId}
                   width={HEADER_W} commands={commands}
                   onToggleCaptions={() => toggleCaptions(trackId)}
@@ -362,11 +410,14 @@ The playhead line/triangle is pointerEvents:none, click it to click the ruler - 
                   trackFromClientY={trackFromClientY} onUpdate={(patch) => commands.updateCaptions(patch, trackId)}
                   onMove={(move) => moveCaptionCue(trackId, move)}
                   onDelete={(laneId, index) => trackCaptions && commands.updateCaptions(removeManualCue(trackCaptions, laneId, index), trackId)} /> : <TrackLane
-                  trackId={trackId} items={items} state={state} commands={commands} pointer={pointer}
+                  trackId={trackId} indexes={indexes} state={state} commands={commands} pointer={pointer}
                   editMode={editMode} pickMode={pickMode} locked={locked} hidden={hidden}
-                  px={px} rowHeight={rowHeightOf(trackId)}
+                  px={px} rowHeight={rowHeightOf(trackId)} visibleWindow={visibleWindow}
+                  pinnedItemIds={pinnedItemIds}
                   libDropTarget={libDropTarget} setLibDropTarget={setLibDropTarget}
                   applyLibraryToClip={applyLibraryToClip} applyLibraryToTrack={applyLibraryToTrack}
+                  rippleOnDrop={placeMode === 'insert'}
+                  overwriteOnDrop={placeMode === 'overwrite'}
                   frameFromClientX={frameFromClientX} onContextMenu={setCtxMenu} scrollRef={scrollRef}
                 />}
               </div>
@@ -375,7 +426,7 @@ The playhead line/triangle is pointerEvents:none, click it to click the ruler - 
 
           {/* snap guide — appears while a drag edge is locked onto a target */}
           {drag && drag.snapAt !== null && (
-            <div style={{ position: 'absolute', top: 0, left: HEADER_W + drag.snapAt * px, width: 1, height: RULER_H + tracksHeight, background: '#4fd1ff', pointerEvents: 'none', boxShadow: '0 0 4px #4fd1ff' }} />
+            <div className="cc-snap-guide" style={{ position: 'absolute', top: 0, left: HEADER_W + drag.snapAt * px, height: RULER_H + tracksHeight }} />
           )}
 
           {/* selection-mode timerange marquee (time-marked drag) */}
@@ -397,14 +448,13 @@ The playhead line/triangle is pointerEvents:none, click it to click the ruler - 
             style={{
               position: 'absolute', top: 0, left: 0,
               transform: `translate3d(${HEADER_W + playheadRef.current * px}px,0,0)`,
-              width: 1, height: RULER_H + tracksHeight,
-              background: theme.textStrong, pointerEvents: 'none',
-              boxShadow: '0 0 0 0.5px #0006',
+              height: RULER_H + tracksHeight,
+              pointerEvents: 'none',
               willChange: 'transform',
               zIndex: 30,
             }}
           >
-            <div className="cc-playhead-handle" style={{ transform: 'translateX(-6px)', width: 13, height: 11, background: theme.textStrong, clipPath: 'polygon(0 0, 100% 0, 50% 100%)' }} />
+            <div className="cc-playhead-handle" style={{ transform: 'translateX(-6px)', width: 13, height: 11, clipPath: 'polygon(0 0, 100% 0, 50% 100%)' }} />
           </div>
         </div>
       </div>

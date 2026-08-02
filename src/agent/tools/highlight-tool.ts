@@ -1,7 +1,8 @@
-import type { AgentToolSchema } from '../tool-schema';
+export { HIGHLIGHT_TOOL_SCHEMAS, HIGHLIGHT_TOOL_NAMES } from './schemas/highlight-tool';
 import type { AgentContext } from '../context';
 import { ASPECT_PRESETS, type AspectPreset, type TimelineItem } from '../../editor/types';
-import { msToFrame, type TranscriptWord } from '../../transcript/types';
+import { sourceWindowForTimelineRange } from '../../editor/sourceLimit';
+import { hasOperationalTranscript, msToFrame, type TranscriptWord } from '../../transcript/types';
 import { generateAgentText } from '../client';
 
 // find_highlights - smart slicing / convert long to short into slices.
@@ -39,28 +40,6 @@ interface SelectOpts {
   topic?: string;
   instruction?: string;
 }
-
-export const HIGHLIGHT_TOOL_SCHEMAS: AgentToolSchema[] = [
-  {
-    name: 'find_highlights',
-    description:
-      'Create short-form highlights from long-form content: read the word-level transcript of a timeline clip, use an LLM to select the strongest self-contained moments, duplicate each into a vertical sequence (default 9:16), and trim it to the selected frame range. The clip must be transcribed first with transcribe_track. Returns each sequence id, title, and frame range. Falls back to information-density heuristics if LLM selection fails.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        count: { type: 'integer', description: 'Number of short videos to create; default 3.' },
-        ratio: { type: 'string', enum: ['9:16', '16:9', '1:1', '4:3', '3:4'], description: 'Short-video canvas ratio; default 9:16.' },
-        topic: { type: 'string', description: 'Optional: select only highlights related to this topic.' },
-        instruction: { type: 'string', description: 'Optional selection preference, such as strongest emotional conflict or moments containing data points.' },
-        itemId: { type: 'string', description: 'Optional transcribed video/audio clip; defaults to the clip with the most words.' },
-        minSeconds: { type: 'number', description: 'Minimum duration per highlight; default 3 seconds.' },
-        maxSeconds: { type: 'number', description: 'Maximum duration per highlight; default 60 seconds.' },
-      },
-    },
-  },
-];
-
-export const HIGHLIGHT_TOOL_NAMES = new Set(HIGHLIGHT_TOOL_SCHEMAS.map((t) => t.name));
 
 // Highlight judgment criteria - talking-head-guide.md rules.
 const SELECT_SYSTEM = `You are a short-form video editor. Select the strongest moments from a word-level talking-head transcript for standalone vertical clips.
@@ -242,11 +221,11 @@ function pickTranscribedItem(items: TimelineItem[], itemId?: string): TimelineIt
     const q = itemId;
     const hit = items.find((it) => (it.id === q || it.id.startsWith(q))
       && (it.kind === 'video' || it.kind === 'audio')
-      && (it.transcript?.length ?? 0) > 0);
+      && hasOperationalTranscript(it));
     if (hit) return hit;
   }
   const scored = items
-    .filter((it) => (it.kind === 'video' || it.kind === 'audio') && (it.transcript?.length ?? 0) > 0)
+    .filter((it) => (it.kind === 'video' || it.kind === 'audio') && hasOperationalTranscript(it))
     .map((it) => ({ it, score: (it.transcript!.length) + (it.kind === 'video' ? 100000 : 0) }));
   if (!scored.length) return null;
   return scored.reduce((best, cur) => (cur.score > best.score ? cur : best)).it;
@@ -271,6 +250,7 @@ export function assembleShorts(
   highlights: Highlight[],
   preset: AspectPreset,
 ): Short[] {
+  if (!hasOperationalTranscript(item)) return [];
   const words = item.transcript!;
   const fps = ctx.getState().fps;
   const shorts: Short[] = [];
@@ -324,7 +304,13 @@ function trimCopyToHighlight(
     ctx.commands.setItemTiming(it.id, {
       startFrame: oStart - spanStart,
       durationInFrames: oEnd - oStart,
-      srcInFrame: it.src ? (it.srcInFrame ?? 0) + leftTrim : undefined,
+      srcInFrame: it.src
+        ? sourceWindowForTimelineRange(
+            it.kind === 'audio' && hasOperationalTranscript(it) ? { ...it, playbackRate: 1 } : it,
+            leftTrim,
+            oEnd - oStart,
+          ).startFrame
+        : undefined,
     });
   }
 }
@@ -340,7 +326,7 @@ export async function execHighlightTool(name: string, args: Args, ctx: AgentCont
     ctx.getState().items,
     typeof args.itemId === 'string' ? args.itemId : undefined,
   );
-  if (!item?.transcript?.length) {
+  if (!hasOperationalTranscript(item)) {
     return { error: '当前时间线没有已转写的视频/音频片段;请先用 transcribe_track 转写,再智能切片。' };
   }
 

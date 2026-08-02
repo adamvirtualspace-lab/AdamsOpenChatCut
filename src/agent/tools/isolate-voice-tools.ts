@@ -1,50 +1,11 @@
+export { ISOLATE_VOICE_TOOL_SCHEMAS, ISOLATE_VOICE_TOOL_NAMES } from './schemas/isolate-voice-tools';
 // isolate_voice — generate, attach, or clear a speech-isolation track.
-import type { AgentToolSchema } from '../tool-schema';
 import type { AgentContext } from '../context';
-import type { TimelineItem } from '../../editor/types';
+import type { MediaAsset, TimelineItem } from '../../editor/types';
 import { isolateVoiceOnSrc } from '../../audio/isolateVoice';
+import { captureTimelineItemSource, validateTimelineItemSourceResult } from '../../editor/mediaSourceRevision';
 
 type Args = Record<string, unknown>;
-
-export const ISOLATE_VOICE_TOOL_SCHEMAS: AgentToolSchema[] = [
-  {
-    name: 'isolate_voice',
-    description:
-      'AI Voice Isolation: reduce background noise on a video/audio clip so speech is clearer. ' +
-      'action=apply (default) runs an open-box ffmpeg spectral denoise on the clip source and attaches the result as denoisedSrc (master src stays intact; playback uses the isolated track). ' +
-      'action=attach points the clip at an existing audio asset after validating denoisedAssetId and sourceAssetId. ' +
-      'action=clear removes isolation and restores original audio. ' +
-      'strength 0..100 (default 70). Requires /media/uploads source (upload/finalize first).',
-    input_schema: {
-      type: 'object',
-      properties: {
-        itemId: { type: 'string', description: 'Target video/audio clip id (prefix ok).' },
-        action: {
-          type: 'string',
-          enum: ['apply', 'attach', 'clear'],
-          description: 'apply = run isolation; attach = use an existing isolated audio asset; clear = detach it.',
-        },
-        sourceAssetId: {
-          type: 'string',
-          description: 'attach: source audio/video asset id or unique prefix. It must match the target clip source.',
-        },
-        denoisedAssetId: {
-          type: 'string',
-          description: 'attach: existing audio asset id or unique prefix containing the isolated full-source audio.',
-        },
-        strength: {
-          type: 'number',
-          minimum: 0,
-          maximum: 100,
-          description: 'Denoise strength 0..100 (default 70). Higher = more aggressive NR.',
-        },
-      },
-      required: ['itemId'],
-    },
-  },
-];
-
-export const ISOLATE_VOICE_TOOL_NAMES = new Set(ISOLATE_VOICE_TOOL_SCHEMAS.map((t) => t.name));
 
 function findItem(items: TimelineItem[], id: unknown): TimelineItem | null {
   const q = String(id ?? '');
@@ -53,9 +14,9 @@ function findItem(items: TimelineItem[], id: unknown): TimelineItem | null {
 }
 
 function findAsset(
-  assets: ReturnType<AgentContext['getDoc']>['assets'],
+  assets: MediaAsset[],
   id: unknown,
-): { asset?: (typeof assets)[number]; error?: string; candidates?: Array<{ id: string; name: string; kind: string }> } {
+): { asset?: MediaAsset; error?: string; candidates?: Array<{ id: string; name: string; kind: string }> } {
   const query = String(id ?? '').trim();
   if (!query) return { error: '缺少素材 id' };
   const exact = assets.find((asset) => asset.id === query);
@@ -165,8 +126,33 @@ export async function execIsolateVoiceTool(
     };
   }
 
+  const sourceSnapshot = captureTimelineItemSource(item, ctx.getDoc().assets ?? []);
   try {
-    const r = await isolateVoiceOnSrc(src, strength);
+    const r = await isolateVoiceOnSrc(src, strength, {
+      force: args.force === true,
+      sourceRevision: sourceSnapshot.sourceRevision,
+    });
+    const currentItem = ctx.getState().items.find((candidate) => candidate.id === item.id);
+    const validation = validateTimelineItemSourceResult(
+      sourceSnapshot,
+      currentItem,
+      ctx.getDoc().assets ?? [],
+      r.sourceRevision,
+    );
+    if (validation.status === 'stale') {
+      return {
+        ok: false,
+        status: 'stale',
+        stale: true,
+        itemId: item.id,
+        action: 'apply',
+        reason: validation.reason,
+        sourceRevision: validation.sourceRevision,
+        currentSourceRevision: validation.currentSourceRevision,
+        resultSourceRevision: validation.resultSourceRevision,
+        note: '源素材在隔离期间已变化；派生结果已丢弃，未修改时间线。',
+      };
+    }
     ctx.commands.setItemDenoise(item.id, r.path, r.strength);
     return {
       ok: true,
@@ -175,6 +161,7 @@ export async function execIsolateVoiceTool(
       denoisedSrc: r.path,
       strength: r.strength,
       engine: r.engine ?? 'ffmpeg-open-box',
+      sourceRevision: r.sourceRevision,
       bytes: r.bytes,
       note: 'Open-box ffmpeg denoise attached; original src unchanged. action=clear to remove.',
     };

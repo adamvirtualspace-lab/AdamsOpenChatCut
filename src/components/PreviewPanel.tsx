@@ -1,10 +1,11 @@
-import { memo, useEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import { Player, type CallbackListener, type PlayerRef } from '@remotion/player';
 import { theme, themeAlpha } from '../theme';
 import { TimelineComposition } from '../editor/TimelineComposition';
+import type { SelectedPreviewStatus, SelectedPreviewStatusListener } from '../gl/previewAdapter';
 import {
   captionTrackEntries,
-  timelineDuration,
+  type ProjectDoc,
   type TimelineItem,
   type TimelineState,
   type TrackId,
@@ -20,11 +21,15 @@ import { appendDroppedManualCaption } from '../captions/manualCaptions';
 import { Icon } from './icons';
 import { useT } from '../i18n/locale';
 import { ReviewCommentsButton, type ReviewOpenRequest } from '../review/ReviewCommentsButton';
+import { usePreviewProjectDoc } from '../media/previewMedia';
+import type { SlipPreview } from '../editor/slip';
+import { SlipTwoUpPreview } from './SlipTwoUpPreview';
 
 const SHARED_AUDIO_TAGS = 8;
 
 interface PreviewPanelProps {
   state: TimelineState;
+  project: ProjectDoc;
   playerRef: RefObject<PlayerRef | null>;
   onImport: (file: File) => Promise<void>;
   offlineSrcs?: ReadonlySet<string>;
@@ -38,14 +43,25 @@ interface PreviewPanelProps {
   reviewRequest?: ReviewOpenRequest | null;
   inspectorOpen: boolean;
   onToggleInspector: () => void;
+  selectedPreviewStatuses?: readonly SelectedPreviewStatus[];
+  onSelectedPreviewStatus?: SelectedPreviewStatusListener;
+  slipPreview?: SlipPreview | null;
 }
 
 export const PreviewPanel = memo(function PreviewPanel({
-  state, playerRef, onImport, offlineSrcs, onUpdateCaptions, onSeedChat,
+  state, project, playerRef, onImport, offlineSrcs, onUpdateCaptions, onSeedChat,
   projectId, timelineId, reviewState, selectedItem, reviewRequest, inspectorOpen, onToggleInspector,
+  selectedPreviewStatuses, onSelectedPreviewStatus, slipPreview,
 }: PreviewPanelProps) {
   const t = useT();
-  const duration = timelineDuration(state);
+  const renderProject = useMemo<ProjectDoc>(() => ({
+    ...project,
+    timelines: project.timelines.map((timeline) => timeline.id === timelineId
+      ? { ...timeline, ...state, id: timeline.id, name: timeline.name, order: timeline.order }
+      : timeline),
+  }), [project, state, timelineId]);
+  const preview = usePreviewProjectDoc(renderProject, timelineId);
+  const duration = preview.plan.durationInFrames;
   const inputRef = useRef<HTMLInputElement>(null);
   const videoBoxRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
@@ -57,7 +73,12 @@ export const PreviewPanel = memo(function PreviewPanel({
   // The document standard event is not guaranteed to be triggered, the SDK emitter is the real source.
   const [fullscreen, setFullscreen] = useState(false);
   const hasItems = state.items.length > 0;
-  const offlineNames = [...new Set(state.items
+  const failedProxies = preview.proxies.filter(({ proxy }) => proxy.status === 'failed');
+  const pendingProxies = preview.proxies.filter(({ proxy }) => proxy.status === 'loading').length;
+  const shaderFallback = selectedPreviewStatuses?.find((status) => status.phase === 'fallback');
+  const offlineNames = [...new Set(renderProject.timelines
+    .filter((timeline) => preview.plan.timelineIds.includes(timeline.id))
+    .flatMap((timeline) => timeline.items)
     .filter((item) => !!item.src && offlineSrcs?.has(item.src))
     .map((item) => item.name))];
   useEffect(() => {
@@ -99,7 +120,7 @@ export const PreviewPanel = memo(function PreviewPanel({
   }));
   return (
     <section style={{ display: 'flex', flex: 1, flexDirection: 'column', background: theme.panel, minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
-      <div style={{ height: 30, padding: '0 12px', display: 'flex', alignItems: 'center', borderBottom: `0.5px solid ${theme.border}`, flexShrink: 0 }}>
+      <div className="cc-preview-header" style={{ height: 30, padding: '0 12px', display: 'flex', alignItems: 'center', borderBottom: `0.5px solid ${theme.border}`, flexShrink: 0 }}>
         <span style={{ fontSize: 12, color: theme.text }}>{t('预览')}</span>
         {pickMode && (
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, marginLeft: 10, fontSize: 11, color: theme.accent }}>
@@ -107,7 +128,7 @@ export const PreviewPanel = memo(function PreviewPanel({
             {t('选择模式：在画面上拖框选区作为引用')}
           </span>
         )}
-        <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <div className="cc-preview-header-actions" style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 6 }}>
           <ReviewCommentsButton
             projectId={projectId}
             timelineId={timelineId}
@@ -162,11 +183,19 @@ export const PreviewPanel = memo(function PreviewPanel({
             position: 'relative', width: 'auto', height: '100%',
             maxWidth: '100%', maxHeight: '100%',
             aspectRatio: `${state.width} / ${state.height}`,
+          }} onErrorCapture={(event) => {
+            if (!(event.target instanceof HTMLVideoElement)) return;
+            const failedUrl = event.target.currentSrc || event.target.src;
+            const source = preview.proxies.find(({ src, proxy }) => {
+              const urls = [src, proxy.status === 'ready' ? proxy.previewSrc : ''].filter(Boolean);
+              return urls.some((url) => new URL(url, window.location.href).href === failedUrl);
+            });
+            if (source) preview.requestFallback(source.src);
           }}>
             <Player
               ref={playerRef}
               component={TimelineComposition}
-              inputProps={{ state }}
+              inputProps={{ state: preview.state, project: preview.project, timelineId, selectedItemId: selectedItem?.id, onSelectedPreviewStatus }}
               durationInFrames={duration}
               fps={state.fps}
               compositionWidth={state.width}
@@ -184,6 +213,7 @@ export const PreviewPanel = memo(function PreviewPanel({
               spaceKeyToPlayOrPause={false}
               loop
             />
+            {slipPreview && <SlipTwoUpPreview preview={slipPreview} />}
             {offlineNames.length > 0 && (
               <div role="status" style={{
                 position: 'absolute', top: 8, left: 8, right: 8, zIndex: 12,
@@ -191,6 +221,32 @@ export const PreviewPanel = memo(function PreviewPanel({
                 border: `1px solid ${theme.accent}`, color: theme.text, fontSize: 11,
               }}>
                 {t('离线素材：{list}', { list: offlineNames.join('、') })}
+              </div>
+            )}
+            {(pendingProxies > 0 || failedProxies.length > 0) && (
+              <div role="status" style={{
+                position: 'absolute', bottom: 8, left: 8, zIndex: 12,
+                maxWidth: 'calc(100% - 16px)', padding: '5px 8px', borderRadius: 5,
+                background: themeAlpha.shadow(0.84), color: failedProxies.length ? theme.accent : theme.textMuted,
+                fontSize: 10,
+              }}>
+                {failedProxies.length
+                  ? t('预览代理失败，已回退原始媒体：{list}', { list: failedProxies.map(({ src }) => src.split('/').pop()).join('、') })
+                  : t('正在准备 {n} 个预览代理…', { n: pendingProxies })}
+              </div>
+            )}
+            {shaderFallback && (
+              <div role="status" aria-live="polite" style={{
+                position: 'absolute', bottom: 8, right: 8, zIndex: 12,
+                maxWidth: 'calc(100% - 16px)', padding: '5px 8px', borderRadius: 4,
+                border: `0.5px solid ${theme.accent}`, background: themeAlpha.shadow(0.88),
+                color: theme.text, fontSize: 10,
+              }}>
+                {shaderFallback.fallbackReason === 'media-loading'
+                  ? t('着色器资源未就绪；当前临时显示回退画面')
+                  : shaderFallback.adapter === 'css-transition'
+                    ? t('着色器预览已回退为 CSS 近似；当前画面不代表导出效果')
+                    : t('着色器预览不可用；当前显示未处理源画面')}
               </div>
             )}
             {showSafe && <SafeZoneOverlay />}
@@ -213,6 +269,7 @@ export const PreviewPanel = memo(function PreviewPanel({
     </section>
   );
 });
+
 
 // Selection-mode marquee over the video rect: drag a rectangle → canvas-region
 // reference in COMPOSITION coordinates, with the visual clips it covers at the
