@@ -1,9 +1,24 @@
 export { TRANSCRIPT_TOOL_SCHEMAS, TRANSCRIPT_TOOL_NAMES } from './schemas/transcript-tools';
 import type { AgentContext } from '../context';
 import { defaultTrackId, resolveTrackId, trackAlias, type TimelineItem, type TrackId } from '../../editor/types';
-import { transcribePath } from '../../transcript/assemblyai';
+import { transcribePath as assemblyaiTranscribePath } from '../../transcript/assemblyai';
+import { transcribePath as whisperTranscribePath } from '../../transcript/whisper';
+import type { TranscriptResult } from '../../transcript/types';
 import { fillerIndices } from '../../transcript/edit';
 import { hasOperationalTranscript } from '../../transcript/types';
+import { srtToTranscript } from '../../transcript/srt';
+import { normalizeLanguage, transcriptionSettings } from '../../transcript/provider-settings';
+
+/** Route to the configured ASR provider in the configured language.
+ * `language` (an explicit tool argument) wins over the configured default, and
+ * an empty result means auto-detect — never a hardcoded language, which silently
+ * produces garbage for anyone whose audio is in something else. */
+async function transcribeForProvider(path: string, language?: string): Promise<TranscriptResult> {
+  const settings = await transcriptionSettings();
+  const fn = settings.provider === 'whisper' ? whisperTranscribePath : assemblyaiTranscribePath;
+  const languageCode = normalizeLanguage(language) || settings.language;
+  return fn(path, undefined, { languageCode: languageCode || undefined });
+}
 import { translateLines } from '../../captions/translate';
 import { createVariant, findVariantByLang, upsertVariant } from '../../transcript/variants';
 import { buildSilenceGapCaps, parseCleanOnly, parseSilenceRule, type SilenceRule } from '../../transcript/clean';
@@ -113,7 +128,7 @@ async function manageTranscript(args: Args, ctx: AgentContext, track: TrackId, a
   if (action === 'retry_transcription') {
     if (!it.src) return { error: `item ${it.id} has no media to transcribe` };
     try {
-      const r = await transcribePath(it.src, undefined, { languageCode: 'zh' });
+      const r = await transcribeForProvider(it.src, typeof args.language === 'string' ? args.language : undefined);
       ctx.commands.setItemTranscript(it.id, r.words);
       return { ok: true, action, itemId: it.id, words: r.words.length, text: r.text.slice(0, 200), retried: true };
     } catch (e) {
@@ -185,17 +200,98 @@ async function manageTranscript(args: Args, ctx: AgentContext, track: TrackId, a
   return { error: `unsupported action "${action}"; use fix / retry_transcription / translation_create / translation_ensure / translation_list / translation_read` };
 }
 
+/** Attach a user-supplied .srt/.vtt to a clip instead of running ASR.
+ * Their wording, their timings, their language — and far faster than transcribing. */
+async function execImportTranscript(args: Args, ctx: AgentContext): Promise<unknown> {
+  const state = ctx.getState();
+
+  let text = typeof args.srt === 'string' ? args.srt : '';
+  const path = typeof args.path === 'string' ? args.path.trim() : '';
+  if (!text && path) {
+    if (!path.startsWith('/media/')) return { error: 'path must be an app-served /media/... URL' };
+    try {
+      const res = await fetch(path);
+      if (!res.ok) return { error: `could not read ${path}: HTTP ${res.status}` };
+      text = await res.text();
+    } catch (e) {
+      return { error: `could not read ${path}: ${e instanceof Error ? e.message : String(e)}` };
+    }
+  }
+  if (!text.trim()) return { error: 'provide the subtitle file as srt (text) or path (/media/... URL)' };
+
+  const isMedia = (x: TimelineItem): boolean => x.kind === 'audio' || x.kind === 'video';
+  const targetId = typeof args.itemId === 'string' ? args.itemId : '';
+  let clip: TimelineItem | undefined;
+  if (targetId) {
+    clip = state.items.find((x) => x.id === targetId || x.id.startsWith(targetId));
+    if (!clip) return { error: `no item ${targetId}` };
+    if (!isMedia(clip)) return { error: `item ${clip.id} is a ${clip.kind}, not audio/video` };
+  } else {
+    // No itemId: prefer the named track, but fall back to any media clip on the
+    // timeline so a video-only project still works without an A1 track.
+    const track = resolveTrackId(state, args.track ?? 'A1') ?? defaultTrackId(state, 'audio');
+    const onTrack = state.items.filter((x) => isMedia(x) && x.track === track);
+    const candidates = (onTrack.length ? onTrack : state.items.filter(isMedia))
+      .sort((a, b) => a.startFrame - b.startFrame);
+    clip = candidates[0];
+    if (!clip) return { error: 'no audio/video clip on the timeline to attach a transcript to' };
+  }
+
+  const had = clip.transcript?.length ?? 0;
+  if (had && args.replace !== true) {
+    return { error: `item ${clip.id} already has a transcript (${had} words); pass replace:true to overwrite` };
+  }
+
+  let parsed;
+  try {
+    parsed = srtToTranscript(text);
+  } catch (e) {
+    return { error: `subtitle parse failed: ${e instanceof Error ? e.message : String(e)}` };
+  }
+  if (!parsed.words.length) return { error: 'no usable cues found in the subtitle file' };
+
+  ctx.commands.setItemTranscript(clip.id, parsed.words);
+
+  // Surface a duration mismatch rather than silently attaching a transcript that
+  // runs past the clip — that usually means the file belongs to different media.
+  const fps = state.fps || 30;
+  const clipMs = Math.round((clip.durationInFrames / fps) * 1000);
+  const lastMs = parsed.words[parsed.words.length - 1].end;
+  return {
+    ok: true,
+    itemId: clip.id,
+    name: clip.name,
+    words: parsed.words.length,
+    firstWordMs: parsed.words[0].start,
+    lastWordMs: lastMs,
+    clipDurationMs: clipMs,
+    replaced: had > 0,
+    text: parsed.text.slice(0, 200),
+    ...(lastMs > clipMs
+      ? { warning: `subtitles run ${Math.round((lastMs - clipMs) / 1000)}s past the end of the clip — check the file matches this media` }
+      : {}),
+  };
+}
+
 // Execute a transcript/caption tool. Returns undefined if `name` isn't one of ours.
 export async function execTranscriptTool(name: string, args: Args, ctx: AgentContext): Promise<unknown | undefined> {
   if (name === 'read_transcript') return execReadTranscript(args, ctx);
+  // Runs before the A1 default below: a subtitle file targets a CLIP, and that clip
+  // is often a video on V1 with no audio track in the project at all.
+  if (name === 'import_transcript') return execImportTranscript(args, ctx);
   if (name === 'search_media') return execSearchMedia(args, ctx);
   const state = ctx.getState();
-  const track = resolveTrackId(state, args.track ?? 'A1') ?? defaultTrackId(state, 'audio');
+  // Speech usually lives on A1, but a project can be video-only (a camera file with
+  // its own audio on V1). Falling back to the video track keeps find_transcript /
+  // clean_script / delete_text usable there instead of failing on a missing A1.
+  const track = resolveTrackId(state, args.track ?? 'A1')
+    ?? defaultTrackId(state, 'audio')
+    ?? defaultTrackId(state, 'video');
   if (!track) return { error: 'no track available; create one with edit_track first' };
   const alias = trackAlias(state, track);
   switch (name) {
     case 'transcribe_track': {
-      // Transcribe ALL audio/video clips on the track (not just the first).
+      const language = typeof args.language === 'string' ? args.language : undefined;
       const clips = ctx.getState().items
         .filter((it) => (it.kind === 'audio' || it.kind === 'video') && it.track === track && it.src)
         .sort((a, b) => a.startFrame - b.startFrame);
@@ -203,11 +299,11 @@ export async function execTranscriptTool(name: string, args: Args, ctx: AgentCon
       const results: { itemId: string; words: number; text: string; skipped?: boolean }[] = [];
       try {
         for (const it of clips) {
-          if (hasOperationalTranscript(it)) {
+          if (hasOperationalTranscript(it) && args.replace !== true) {
             results.push({ itemId: it.id, words: it.transcript.length, text: '', skipped: true });
             continue;
           }
-          const r = await transcribePath(it.src!, undefined, { languageCode: 'zh' });
+          const r = await transcribeForProvider(it.src!, language);
           ctx.commands.setItemTranscript(it.id, r.words);
           results.push({ itemId: it.id, words: r.words.length, text: r.text.slice(0, 200) });
         }

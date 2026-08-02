@@ -78,11 +78,16 @@ const CAP_PROVIDERS: Partial<Record<CapabilityKey, ProviderRow[]>> = {
     { label: 'Unsplash', arg: 'unsplash', argKey: 'provider', need: [['UNSPLASH_ACCESS_KEY']] },
     { label: 'Freesound', arg: 'freesound', argKey: 'provider', need: [['FREESOUND_API_KEY']] },
   ],
+  transcription: [
+    { label: 'AssemblyAI', arg: 'assemblyai', argKey: 'provider', need: [['ASSEMBLYAI_API_KEY']] },
+    { label: 'Local Whisper', arg: 'whisper', argKey: 'provider', need: [] },
+  ],
 };
 
 const PREFERRED_KEY: Partial<Record<CapabilityKey, string>> = {
   image: 'PREFERRED_IMAGE_VENDOR', voice: 'PREFERRED_VOICE_VENDOR',
   video: 'PREFERRED_VIDEO_VENDOR', music: 'PREFERRED_MUSIC_VENDOR',
+  transcription: 'TRANSCRIPTION_PROVIDER',
 };
 
 const rowTag = (r: ProviderRow): string => `${r.label}(${r.argKey}=${r.arg})`;

@@ -12,16 +12,36 @@ export type Locale = 'zh' | 'en';
 
 const STORAGE_KEY = 'cc.locale';
 
+/** Browser UI language, when the user has never made an explicit choice.
+ * Anything that isn't a Chinese locale gets English rather than falling into
+ * Chinese, which is unreadable for non-Chinese users and hides the toggle. */
+function browserLocale(): Locale {
+  try {
+    const langs = navigator.languages?.length ? navigator.languages : [navigator.language];
+    for (const lang of langs) {
+      if (!lang) continue;
+      if (/^zh\b/i.test(lang)) return 'zh';
+      return 'en';
+    }
+  } catch { /* no navigator (SSR / tests) — fall through */ }
+  return 'en';
+}
+
 function readInitial(): Locale {
   try {
-    return localStorage.getItem(STORAGE_KEY) === 'en' ? 'en' : 'zh';
-  } catch {
-    return 'zh';
-  }
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved === 'en' || saved === 'zh') return saved;
+  } catch { /* storage blocked — fall back to the browser language */ }
+  return browserLocale();
 }
 
 let current: Locale = readInitial();
 const subscribers = new Set<() => void>();
+
+// setLocale() only syncs <html lang> on change, so stamp the initial value too.
+try {
+  document.documentElement.lang = current === 'en' ? 'en' : 'zh-CN';
+} catch { /* no document (tests) */ }
 
 export function getLocale(): Locale {
   return current;

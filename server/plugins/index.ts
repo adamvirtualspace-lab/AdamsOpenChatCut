@@ -35,6 +35,7 @@ import { settingsPlugin } from "./settings.ts";
 import { externalAgentPlugin } from "./external-agent.ts";
 import { codexAgentPlugin } from "./codex-agent.ts";
 import { llmProxyPlugin } from "./llm-proxy.ts";
+import { whisperPlugin } from "./whisper.ts";
 import { resourcePreviewPlugin } from "./resource-preview.ts";
 import { getKey } from "../keystore.ts";
 
@@ -59,6 +60,7 @@ export function serverPlugins(): Plugin[] {
     uploadPlugin(),
     mobileUploadPlugin(),
     extractAudioPlugin(),
+    whisperPlugin(),
     assemblyAiUploadPlugin(),
     extractFramesPlugin(),
     sceneDetectionPlugin(),

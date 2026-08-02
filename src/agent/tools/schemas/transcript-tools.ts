@@ -18,8 +18,29 @@ export const TRANSCRIPT_TOOL_SCHEMAS: AgentToolSchema[] = [
   },
   {
     name: 'transcribe_track',
-    description: 'Transcribe the audio clip on a track (word-level + speaker labels, via AssemblyAI) and attach the transcript. Required before find_transcript / clean_script / delete_text / captions when the clip has no transcript yet.',
-    input_schema: { type: 'object', properties: { track: { type: 'string', description: 'Track alias or stable id whose audio to transcribe (default A1).' } } },
+    description: 'Transcribe every audio/video clip on a track — word-level timestamps, using the configured provider (AssemblyAI cloud or local Whisper). This is THE tool for transcription; never try to run ffmpeg or Whisper manually in a sandbox. Required before find_transcript / clean_script / delete_text / captions when clips have no transcript yet.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        track: { type: 'string', description: 'Track alias or stable id whose audio to transcribe (default A1).' },
+        language: { type: 'string', description: "Spoken language as ISO-639-1, e.g. 'id', 'en', 'zh'. Omit to use the configured TRANSCRIPTION_LANGUAGE, or auto-detect when that is unset. Setting the wrong language does not fail — it returns confident nonsense — so pass it when you know it." },
+        replace: { type: 'boolean', description: 'Re-transcribe clips that already have a transcript (default false — they are skipped). Use when switching provider, model, or language.' },
+      },
+    },
+  },
+  {
+    name: 'import_transcript',
+    description: 'Attach an existing SubRip (.srt) or WebVTT (.vtt) subtitle file to a clip as its word-level transcript, INSTEAD of running ASR. Use when the user already has a subtitle file — it is faster than transcribe_track and keeps their own wording, timings, and language. Cue spans are divided across words by length, so find_transcript / clean_script / delete_text / captions all work afterwards. Provide the file with `srt` (raw text) or `path` (a /media/uploads/... URL served by this app). Targets one clip via itemId, else the first audio/video clip on `track`. Subtitle times are treated as offsets into the clip SOURCE, so the file must match the clip it is attached to.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        srt: { type: 'string', description: 'Raw .srt/.vtt file contents. Use this OR path.' },
+        path: { type: 'string', description: 'App-served subtitle URL, e.g. /media/uploads/clip.srt. Use this OR srt.' },
+        itemId: { type: 'string', description: 'Target clip id or unique prefix. Omit to use the first audio/video clip on the track.' },
+        track: { type: 'string', description: 'Track alias/id used when itemId is omitted (default A1).' },
+        replace: { type: 'boolean', description: 'Overwrite an existing transcript on the clip (default false — an existing transcript is left alone).' },
+      },
+    },
   },
   {
     name: 'search_media',

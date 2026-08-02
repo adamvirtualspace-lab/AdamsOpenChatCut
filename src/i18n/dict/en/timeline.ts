@@ -59,6 +59,7 @@ export default {
   '裁切': 'Crop',
   '字幕显示': 'Captions',
   '字幕显示（当前还没有字幕，先转写或让 Agent 生成）': 'Captions (none yet — transcribe first or ask the Agent to generate them)',
+  '字幕显示（已有文字稿，让 Agent 生成字幕即可开启）': 'Captions (transcript ready — ask the Agent to generate captions to enable this)',
   '开启': 'On',
   '未开启': 'Off',
   '关闭': 'Close',

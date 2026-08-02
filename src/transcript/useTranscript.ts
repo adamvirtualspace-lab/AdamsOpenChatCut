@@ -1,7 +1,53 @@
 import { useCallback, useState } from 'react';
-import { TranscriptionError, transcribePath, type TranscribeOptions } from './assemblyai';
+import { TranscriptionError, transcribePath as assemblyaiTranscribePath, type TranscribeOptions } from './assemblyai';
+import { transcribePath as whisperTranscribePath, type WhisperProgress } from './whisper';
+import { transcriptionSettings } from './provider-settings';
 import type { TranscriptResult, TranscriptStatus } from './types';
 import { t } from '../i18n/locale';
+
+/** Route to the configured provider. This hook used to import AssemblyAI's
+ * transcribePath directly, so the panel's Transcribe button uploaded media to
+ * AssemblyAI even when the project was set to local Whisper. */
+async function transcribeVia(
+  path: string,
+  onProcessing: () => void,
+  opts?: TranscribeOptions & { onProgress?: (p: WhisperProgress) => void },
+): Promise<{ result: TranscriptResult; local: boolean }> {
+  const settings = await transcriptionSettings();
+  const local = settings.provider === 'whisper';
+  const fn = local ? whisperTranscribePath : assemblyaiTranscribePath;
+  const result = await fn(path, onProcessing, {
+    ...opts,
+    languageCode: opts?.languageCode ?? settings.language ?? undefined,
+  });
+  return { result, local };
+}
+
+/** Local ASR never uploads — say what is actually happening. */
+async function startLabel(label?: string): Promise<string> {
+  const { provider } = await transcriptionSettings();
+  if (provider === 'whisper') {
+    return label ? t('本地转写 {label}…', { label }) : t('本地转写中…');
+  }
+  return label ? t('上传 {label}…', { label }) : t('上传音频…');
+}
+
+const mmss = (sec: number): string => {
+  const s = Math.max(0, Math.round(sec));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+
+/** "42% · 24:10 / 57:50 · ~6:31 left" — percent alone hides how long is left. */
+function progressLabel(p: WhisperProgress): string {
+  if (p.phase === 'loading-model') return t('加载模型…');
+  if (p.phase === 'decoding') return t('解码音频…');
+  const base = t('{percent}% · {done} / {total}', {
+    percent: p.percent, done: mmss(p.doneSec), total: mmss(p.totalSec),
+  });
+  return p.etaSec === null || p.doneSec <= 0
+    ? base
+    : `${base} · ${t('约剩 {eta}', { eta: mmss(p.etaSec) })}`;
+}
 
 function transcriptErrorMessage(error: unknown): string {
   if (error instanceof TranscriptionError) {
@@ -37,15 +83,18 @@ export function useTranscript() {
     setError(null);
     setResult(null);
     setActiveItemId(opts?.itemId ?? null);
-    setProgressNote(opts?.label ? t('上传 {label}…', { label: opts.label }) : t('上传音频…'));
+    setProgressNote(await startLabel(opts?.label));
     try {
-      const r = await transcribePath(
+      const { result: r } = await transcribeVia(
         path,
         () => {
           setStatus('processing');
           setProgressNote(opts?.label ? t('转写 {label}…', { label: opts.label }) : t('转写中…'));
         },
-        { languageCode: opts?.languageCode },
+        {
+          languageCode: opts?.languageCode,
+          onProgress: (p) => { setStatus('processing'); setProgressNote(progressLabel(p)); },
+        },
       );
       setResult(r);
       setStatus('done');
@@ -77,15 +126,25 @@ export function useTranscript() {
       const job = jobs[i]!;
       setActiveItemId(job.itemId);
       setStatus('uploading');
-      setProgressNote(t('({i}/{total}) 上传 {label}…', { i: i + 1, total: jobs.length, label: job.label }));
+      setProgressNote(t('({i}/{total}) {phase}', {
+        i: i + 1, total: jobs.length, phase: await startLabel(job.label),
+      }));
       try {
-        const r = await transcribePath(
+        const { result: r } = await transcribeVia(
           job.path,
           () => {
             setStatus('processing');
             setProgressNote(t('({i}/{total}) 转写 {label}…', { i: i + 1, total: jobs.length, label: job.label }));
           },
-          opts,
+          {
+            ...opts,
+            onProgress: (p) => {
+              setStatus('processing');
+              setProgressNote(t('({i}/{total}) {phase}', {
+                i: i + 1, total: jobs.length, phase: progressLabel(p),
+              }));
+            },
+          },
         );
         last = r;
         setResult(r);

@@ -12,6 +12,8 @@ import {
   transcribePathResumable,
   type AssemblyAiProviderStatus,
 } from './assemblyai';
+import { transcribePath as whisperTranscribePath } from './whisper';
+import { transcriptionSettings } from './provider-settings';
 import {
   loadTranscriptionCheckpoint,
   saveTranscriptionCheckpoint,
@@ -54,6 +56,9 @@ function isCurrentGeneration(
 }
 
 const POLL_MS = 1000;
+// AssemblyAI checkpoint fallback language when neither the caller nor a resumed
+// checkpoint specifies one. (The Whisper path uses the configured language and
+// otherwise auto-detects, so this only affects the cloud provider.)
 const DEFAULT_LANG = 'zh';
 
 interface EnqueueOptions {
@@ -120,6 +125,41 @@ export function enqueueTranscription(
 
   void (async (): Promise<TranscribeJob | null> => {
     const key = { projectId, assetId: asset.id, sourceRevision };
+
+    // Local Whisper is a blocking call to /api/transcribe-local: no upload, no
+    // provider job, no checkpoint. Skip the AssemblyAI resumable machinery below
+    // and return a terminal job directly, reusing the same generation/staleness
+    // guards so a superseded source still can't commit a stale result.
+    const settings = await transcriptionSettings();
+    if (settings.provider === 'whisper') {
+      try {
+        let asrPath: string | null | undefined;
+        try { asrPath = opts.asrPath != null ? await opts.asrPath : undefined; }
+        catch { asrPath = undefined; }
+        if (!isCurrentGeneration(projectId, asset.id, sourceRevision, generation)) return null;
+        const result = await whisperTranscribePath(asset.src, undefined, {
+          languageCode: opts.languageCode ?? settings.language ?? undefined,
+          asrPath: asrPath || undefined,
+        });
+        if (!isCurrentGeneration(projectId, asset.id, sourceRevision, generation)) return null;
+        if (!sourceIsCurrent()) {
+          return {
+            projectId, assetId: asset.id, generation, sourceRevision,
+            status: 'failed', stale: true,
+            error: 'transcription result ignored because the source revision changed',
+          };
+        }
+        return { projectId, assetId: asset.id, generation, sourceRevision, status: 'done', words: result.words };
+      } catch (error) {
+        if (!isCurrentGeneration(projectId, asset.id, sourceRevision, generation) || !sourceIsCurrent()) return null;
+        return {
+          projectId, assetId: asset.id, generation, sourceRevision,
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
     let checkpoint: TranscriptionCheckpoint | undefined;
     try {
       const now = Date.now();
@@ -337,6 +377,9 @@ export async function waitForTranscribeJobs(
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
 }
+
+/** Invalidate cached transcription routing so the next job re-reads the keystore. */
+export { invalidateTranscriptionSettings as invalidateProviderCache } from './provider-settings';
 
 /** Test seam: reset the in-memory table (used by the check; not part of the app flow). */
 export function __resetTranscribeJobs(): void {

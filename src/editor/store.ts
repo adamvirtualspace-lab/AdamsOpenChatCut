@@ -107,6 +107,9 @@ export interface EditorCommands {
   /** Toggle/configure the text watermark overlay with a partial, undoable update. */
   updateWatermark: (patch: Partial<Watermark>) => void;
   setItemTranscript: (id: string, words: TranscriptWord[]) => void;
+  /** Drop a clip's transcript plus everything derived from it (word cuts, gap
+   * caps, play order, variants). Undoable, like any other edit. */
+  clearItemTranscript: (id: string) => void;
   /** Ingest an ASR result into a pool asset. Clips created from the asset
    * inherit its transcript at placement; status/error drive the media-pool badge. */
   setAssetTranscription: (id: string, patch: Partial<Pick<MediaAsset, 'transcript' | 'transcriptSourceRevision' | 'transcribeStatus' | 'transcribeError'>>) => void;
@@ -499,6 +502,7 @@ function buildCommands(dispatch: ProjectDispatch, getDoc: () => ProjectDoc): Edi
       updateCaptions: (patch, track) => dispatch({ type: 'updateCaptions', patch, track }),
       updateWatermark: (patch) => dispatch({ type: 'updateWatermark', patch }),
       setItemTranscript: (id, words) => dispatch({ type: 'setItemTranscript', id, words }),
+      clearItemTranscript: (id) => dispatch({ type: 'clearTranscript', id }),
       setAssetTranscription: (id, patch) => dispatch({ type: 'pool.setTranscription', id, patch }),
       setItemVariants: (id, variants) => dispatch({ type: 'setItemVariants', id, variants }),
       toggleWord: (id, idx) => dispatch({ type: 'toggleWord', id, idx }),

@@ -26,15 +26,20 @@ interface TranscriptPanelProps {
   onSetTranscriptPlayOrder: (id: string, playOrder: number[] | null) => void;
   onReorderTrackItems: (track: TrackId, orderedIds: string[]) => void;
   onClearEdits: (id: string) => void;
+  /** Drop a clip's transcript entirely, and everything derived from it. */
+  onClearTranscript: (id: string) => void;
   onImportSrt: (file: File) => void;
   onOpenCaptionStyles?: (sourceItemIds: string[]) => void;
 }
 
 const MANY_CLIPS = 10;
+/** How long the delete button stays armed before reverting to its normal label. */
+const CONFIRM_MS = 4000;
 
 export function TranscriptPanel({
   playerRef, fps, items, trackOptions,
   onSetItemTranscript, onToggleWord, onCleanScript, onSetGapCap, onSetTranscriptPlayOrder, onReorderTrackItems, onClearEdits,
+  onClearTranscript,
   onImportSrt, onOpenCaptionStyles,
 }: TranscriptPanelProps) {
   const t = useT();
@@ -51,6 +56,10 @@ export function TranscriptPanel({
   const [pauseResult, setPauseResult] = useState<string | null>(null);
   const [focusItemId, setFocusItemId] = useState<string | null>(null);
   const [includeMusic, setIncludeMusic] = useState(false);
+  /** Delete transcript is armed by a first click; a second click within CONFIRM_MS commits. */
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const confirmTimer = useRef<number | null>(null);
+  useEffect(() => () => { if (confirmTimer.current) window.clearTimeout(confirmTimer.current); }, []);
   /** many clips: default show only the focused section to keep the list usable */
   const [showAllSections, setShowAllSections] = useState(false);
   const dragClipFrom = useRef<string | null>(null);
@@ -186,6 +195,33 @@ export function TranscriptPanel({
         >
           <Icon name="captions" size={13} />{t('字幕样式')}
         </button>
+        <button
+          type="button"
+          className={`cc-tx-btn${confirmDelete ? ' active' : ''}`}
+          disabled={!transcribed.length}
+          title={transcribed.length ? t('删除该轨的文字稿（可撤销）') : t('该轨还没有文字稿')}
+          onClick={() => {
+            // Two-step inline confirm rather than window.confirm(): native dialogs
+            // are suppressed in embedded browsers (Electron/desktop webviews), where
+            // confirm() silently returns false and the button appears dead.
+            if (!confirmDelete) {
+              setConfirmDelete(true);
+              if (confirmTimer.current) window.clearTimeout(confirmTimer.current);
+              confirmTimer.current = window.setTimeout(() => setConfirmDelete(false), CONFIRM_MS);
+              return;
+            }
+            if (confirmTimer.current) window.clearTimeout(confirmTimer.current);
+            setConfirmDelete(false);
+            for (const item of transcribed) onClearTranscript(item.id);
+            setEditMode(false);
+            setPauseResult(null);
+          }}
+        >
+          <Icon name="trash" size={13} />
+          {confirmDelete
+            ? t('确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销', { n: transcribed.length })
+            : t('删除文字稿')}
+        </button>
         <span className="cc-tx-spacer" />
         {pauseOpen && (
           <div className="cc-tx-popover">
@@ -258,7 +294,7 @@ export function TranscriptPanel({
             <div className="cc-tx-empty-kicker">{aliasLabel}</div>
             <div className="cc-tx-empty-title">{t('转写词级文字稿')}</div>
             <p className="cc-tx-muted">
-              {t('中文词级转写 · 说话人分离 · 该轨共 {n} 段会逐段上传。转写后可点词删减（删词=剪音频）。', { n: clips.length })}
+              {t('词级转写 · 该轨共 {n} 段会逐段处理。转写后可点词删减（删词=剪音频）。', { n: clips.length })}
             </p>
             {skippedMusic > 0 && (
               <label className="cc-tx-check music">

@@ -138,6 +138,10 @@ export function TimelineToolbar({
   const [motionTrackingOpen, setMotionTrackingOpen] = useState(false);
   const modalFocus = useFocusReturn();
   const captionTracks = captionTrackEntries(state).filter((entry) => entry.captions);
+  // A transcript is not captions — an imported .srt or a finished ASR pass fills
+  // the former without creating the latter. Distinguish the two in the tooltip so
+  // it stops telling people to transcribe something they already transcribed.
+  const hasTranscript = state.items.some((item) => (item.transcript?.length ?? 0) > 0);
   return (
     <>
       <div className="cc-timeline-toolbar">
@@ -220,7 +224,11 @@ export function TimelineToolbar({
           <optgroup label={t('内容适配')}><option value="__contain__">{t('留边')}</option><option value="__cover__">{t('裁切')}</option></optgroup>
         </select>
       </label>
-      <button className={`cc-caption-toggle cc-tip cc-tip-r${captionsVisible ? ' active' : ''}`} data-tip={captionTracks.length ? t('字幕显示') : t('字幕显示（当前还没有字幕，先转写或让 Agent 生成）')} aria-label={t('字幕显示')} disabled={!captionTracks.length} onClick={() => commands.batch(captionTracks.map((entry) => ({ type: 'updateCaptions', track: entry.id, patch: { enabled: !captionsVisible } })), 'Toggle captions')}><Icon name="captions" size={17} /><span>{captionsVisible ? t('开启') : t('未开启')}</span><Icon name="chevronDown" size={13} /></button>
+      <button className={`cc-caption-toggle cc-tip cc-tip-r${captionsVisible ? ' active' : ''}`} data-tip={captionTracks.length
+          ? t('字幕显示')
+          : hasTranscript
+            ? t('字幕显示（已有文字稿，让 Agent 生成字幕即可开启）')
+            : t('字幕显示（当前还没有字幕，先转写或让 Agent 生成）')} aria-label={t('字幕显示')} disabled={!captionTracks.length} onClick={() => commands.batch(captionTracks.map((entry) => ({ type: 'updateCaptions', track: entry.id, patch: { enabled: !captionsVisible } })), 'Toggle captions')}><Icon name="captions" size={17} /><span>{captionsVisible ? t('开启') : t('未开启')}</span><Icon name="chevronDown" size={13} /></button>
       <TB icon="fullscreen" title={t('全屏预览')} tipRight onClick={() => invokeAction('fullscreen', undefined, 'toolbar')} />
       </div>
       </div>

@@ -274,9 +274,47 @@ export const SETTINGS_CATEGORIES: readonly SettingsCategory[] = [
           { key: 'stock/freesound', vendor: 'freesound', title: 'Freesound', fields: [secret('FREESOUND_API_KEY', 'API Key')] },
         ] },
       { key: 'transcription', title: '转写 / 口播剪辑', hint: 'transcribe_track · 词级字幕、清口水、删词。',
+        route: routeSelect('TRANSCRIPTION_PROVIDER', [
+          { value: 'assemblyai', label: 'AssemblyAI（云端）' },
+          { value: 'whisper', label: 'Whisper（本地）' },
+        ]),
         vendors: [
           { key: 'transcription/assemblyai', vendor: 'assemblyai', title: 'AssemblyAI',
             fields: [secret('ASSEMBLYAI_API_KEY', 'API Key')] },
+          { key: 'transcription/whisper', vendor: 'whisper', title: 'Whisper（本地）',
+            note: '使用 OpenAI Whisper 模型在本地转写。首次使用需下载模型文件（仅一次）。无需 API Key，离线可用，但无说话人分离。',
+            fields: [
+              { name: 'WHISPER_MODEL', label: '模型大小', kind: 'select', defaultLabel: 'tiny（最快）',
+                options: [
+                  { value: 'tiny', label: 'tiny（~75MB·最快）' },
+                  { value: 'base', label: 'base（~145MB·均衡）' },
+                  { value: 'small', label: 'small（~490MB·更准）' },
+                  { value: 'medium', label: 'medium（~1.5GB·推荐）' },
+                  { value: 'large', label: 'large（~3GB·最准）' },
+                ] },
+              { name: 'TRANSCRIPTION_LANGUAGE', label: '语言', kind: 'text', defaultLabel: '留空 = 自动识别',
+                placeholder: 'id / en / zh …',
+                note: '口语语言（ISO-639-1）。填错不会报错，只会输出看似流畅的胡话。' },
+              { name: 'WHISPER_ENGINE', label: '引擎', kind: 'select', defaultLabel: '自动',
+                note: '自动：装了 whisper.cpp 就用它（GPU · large-v3 · VAD，快很多也准很多），否则用内置 transformers.js（免安装）。在下方「本地引擎」里安装模型。',
+                options: [
+                  { value: '', label: '自动（推荐）' },
+                  { value: 'onnx', label: '始终用内置 transformers.js' },
+                ] },
+              { name: 'WHISPER_CPP_DIR', label: 'whisper.cpp 目录', kind: 'text',
+                defaultLabel: '留空 = ~/whisper.cpp',
+                placeholder: 'C:\\Users\\me\\whisper.cpp',
+                note: '可执行文件与 models/ 所在目录。' },
+              { name: 'WHISPER_CPP_MAX_LEN', label: '每段最多字符', kind: 'text',
+                defaultLabel: '默认 18', placeholder: '18',
+                note: 'whisper.cpp --max-len：在转写时就把长句切成短段（每段自带真实时间轴），字幕更好读。填 0 = 不切分。' },
+              { name: 'WHISPER_DENOISE', label: '转写前降噪', kind: 'select', defaultLabel: '关闭',
+                note: '先做人声频段限制 + 频谱降噪再转写。游戏 / 音乐等嘈杂素材上能多认出不少词；干净的录音棚素材可能反而变差。',
+                options: [
+                  { value: '', label: '关闭（默认）' },
+                  { value: '1', label: '开启（嘈杂素材推荐）' },
+                ] },
+            ] },
         ] },
     ],
   },
@@ -433,6 +471,8 @@ const ROUTE_NEEDS: Record<string, readonly (readonly string[])[]> = {
   kling: [['KLING_API_KEY']],
   hailuo: [['MINIMAX_API_KEY']],
   mureka: [['MUREKA_API_KEY']],
+  assemblyai: [['ASSEMBLYAI_API_KEY']],
+  whisper: [],
 };
 
 /** Routing drop-down option copy: Add the "(not configured)" suffix when the provider has not configured it, and it is still optional (there is a fallback inquiry guardrail on the Agent side).

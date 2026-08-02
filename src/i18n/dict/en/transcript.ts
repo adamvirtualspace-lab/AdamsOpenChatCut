@@ -3,6 +3,25 @@
 export default {
   '素材文件不可用，请在“我的素材”中重新链接后再转写': 'The media file is unavailable. Relink it in My Media before transcribing.',
   '无法连接转写服务，请检查网络和 AssemblyAI 配置后重试': 'Cannot reach the transcription service. Check the network and AssemblyAI settings, then try again.',
+  // useTranscript — local ASR does not upload, so the phase label differs by provider
+  '本地转写 {label}…': 'Transcribing {label} locally…',
+  '本地转写中…': 'Transcribing locally…',
+  '({i}/{total}) {phase}': '({i}/{total}) {phase}',
+  '加载模型…': 'Loading model…',
+  '解码音频…': 'Decoding audio…',
+  '{percent}% · {done} / {total}': '{percent}% · {done} / {total}',
+  '约剩 {eta}': '~{eta} left',
+  '词级转写 · 该轨共 {n} 段会逐段处理。转写后可点词删减（删词=剪音频）。':
+    'Word-level transcription · all {n} clips on this track are processed one by one. Then click words to cut them (delete a word = cut the audio).',
+  // TranscriptPanel — delete the whole transcript for the active track
+  '删除文字稿': 'Delete transcript',
+  '删除该轨的文字稿（可撤销）': 'Delete this track\'s transcript (undoable)',
+  '该轨还没有文字稿': 'This track has no transcript yet',
+  '确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销':
+    'Confirm: delete {n} transcript(s)? Word cuts and pause edits will be undone too',
+  // segment.ts — speaker labels shown above each group in the transcript views
+  '说话人': 'Speaker',
+  '说话人 {n}': 'Speaker {n}',
   // TranscriptPanel — Toolbar and pause pop-up layer
   '停顿': 'Pauses',
   '段落视图': 'Paragraph view',

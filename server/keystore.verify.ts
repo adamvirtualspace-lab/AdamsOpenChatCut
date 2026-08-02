@@ -83,6 +83,16 @@ const MODEL_ROUTING_NAMES = [
   'R2_ENABLED', // Cloud synchronization switch (''=enable/'0'=disable)
   'R2_PRESIGN', // Browser pre-signed direct transmission (''=enabled/'0'=server-side write-through only)
   'MEDIA_DIR',  // Asset saving directory (''=default public/media/uploads)
+  'TRANSCRIPTION_PROVIDER', // ASR route: ''/assemblyai = cloud, 'whisper' = local
+  'TRANSCRIPTION_LANGUAGE', // Spoken language ISO-639-1; '' = auto-detect
+  'WHISPER_DENOISE',        // '1' = band-limit + denoise before ASR (ONNX path)
+  'WHISPER_ENGINE',         // ''/auto = whisper.cpp when installed, else ONNX; 'onnx' forces ONNX
+  'WHISPER_CPP_DIR',        // whisper.cpp install root (paths below default under it)
+  'WHISPER_CPP_BIN',
+  'WHISPER_CPP_MODEL',
+  'WHISPER_CPP_VAD_MODEL',
+  'WHISPER_CPP_MAX_LEN',  // characters per subtitle segment; 0 = no cap
+  'WHISPER_MODEL',          // Local Whisper size: tiny|base|small|medium|large
 ] as const;
 for (const name of MODEL_ROUTING_NAMES) {
   assert.ok((KEY_NAMES as readonly string[]).includes(name), `${name} is whitelisted (settable via POST /api/keys)`);

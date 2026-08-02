@@ -15,6 +15,12 @@ const DRAFT_EDIT_TOOL_NAMES = new Set([
   'set_aspect_ratio', 'manage_timelines', 'edit_track', 'apply_script',
   'edit_item', 'manage_effects', 'edit_captions', 'update_watermark',
   'manage_markers',
+  // Media pool: external agents need a way to get footage into a project.
+  // register_placeholder only adds a pool row pointing at /media/uploads/<id>;
+  // it writes no bytes on its own.
+  'import_media',
+  // Attaches a user-supplied .srt/.vtt as a clip's transcript instead of running ASR.
+  'import_transcript',
 ]);
 export function isExternalGlobalReadTool(name: string): boolean {
   return GLOBAL_READ_TOOL_NAMES[name] === true;

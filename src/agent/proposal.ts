@@ -8,6 +8,7 @@
 import type { AnyAction } from '../editor/store';
 import type { ProjectDoc, TimelineState } from '../editor/types';
 import { migrateProjectDoc } from '../persist/projectStore';
+import { t } from '../i18n/locale';
 
 export interface Operation {
   tool: string;
@@ -43,6 +44,9 @@ export interface Proposal {
 }
 
 // map an agent tool call + the store actions it produced into a display Operation.
+// Labels render in the proposal card, so they go through t() like any other UI copy.
+// Raw Chinese keys; translated at lookup so a language switch takes effect
+// (a module-level t() would bake in whatever locale was active at import).
 const VERB: Record<string, string> = {
   add_motion_graphic: '添加动画',
   create_motion_graphic: '生成动画',
@@ -80,7 +84,7 @@ function targetOf(args: Record<string, unknown>, actions: AnyAction[]): string {
     if (a.type === 'tl.create') return a.timeline.name;
     if (a.type === 'tl.duplicate' || a.type === 'tl.rename') return a.name;
   }
-  return '时间线';
+  return t('时间线');
 }
 
 function impactOf(actions: AnyAction[]): string {
@@ -94,12 +98,12 @@ function impactOf(actions: AnyAction[]): string {
     else mod++;
   }
   const parts: string[] = [];
-  if (addSeq) parts.push(`+${addSeq} 序列`);
-  if (delSeq) parts.push(`−${delSeq} 序列`);
-  if (add) parts.push(`+${add} 片段`);
-  if (del) parts.push(`−${del} 片段`);
-  if (mod) parts.push(`${mod} 处改动`);
-  return parts.join(' · ') || '无变化';
+  if (addSeq) parts.push(t('+{n} 序列', { n: addSeq }));
+  if (delSeq) parts.push(t('−{n} 序列', { n: delSeq }));
+  if (add) parts.push(t('+{n} 片段', { n: add }));
+  if (del) parts.push(t('−{n} 片段', { n: del }));
+  if (mod) parts.push(t('{n} 处改动', { n: mod }));
+  return parts.join(' · ') || t('无变化');
 }
 
 export function buildOperation(tool: string, args: Record<string, unknown>, actions: AnyAction[]): Operation {
@@ -107,7 +111,7 @@ export function buildOperation(tool: string, args: Record<string, unknown>, acti
     tool,
     args,
     actions,
-    action: VERB[tool] ?? tool,
+    action: VERB[tool] ? t(VERB[tool]) : tool,
     target: targetOf(args, actions),
     impact: impactOf(actions),
     rationale: typeof args.rationale === 'string' ? args.rationale : undefined,

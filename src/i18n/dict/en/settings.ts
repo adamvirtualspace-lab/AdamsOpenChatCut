@@ -180,6 +180,19 @@ export default {
   '测试请求失败 ({n})': 'Test request failed ({n})',
   '（按当前输入测试，记得保存）': ' (tested with current input — remember to save)',
   '发一条最小请求验证 Key 与地址可用': 'Sends one minimal request to verify the key and endpoint',
+
+  // ── Whisper (local transcription) ──
+  'Whisper（本地）': 'Local Whisper',
+  'AssemblyAI（云端）': 'AssemblyAI (Cloud)',
+  '使用 OpenAI Whisper 模型在本地转写。首次使用需下载约 150MB 的模型文件（仅一次）。无需 API Key，离线可用，但无说话人分离。':
+    'Uses OpenAI Whisper locally. The first run downloads ~150MB of model data (one-time). No API key required, works offline, no speaker diarization.',
+  '模型大小': 'Model size',
+  'tiny（最快）': 'tiny (fastest)',
+  'tiny（~150MB·最快）': 'tiny (~150MB·fastest)',
+  'base（~300MB·均衡）': 'base (~300MB·balanced)',
+  'small（~600MB·更准）': 'small (~600MB·more accurate)',
+  'medium（~1.5GB·推荐）': 'medium (~1.5GB·recommended)',
+  'large（~3GB·最准）': 'large (~3GB·most accurate)',
   '本次设置': 'This session',
   '取消清除': 'Undo clear',
   '清除': 'Clear',

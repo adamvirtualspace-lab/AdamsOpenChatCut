@@ -35,7 +35,19 @@ assert.deepStrictEqual(await execTrackTool('edit_track', { action: 'delete', tra
 });
 await execTrackTool('edit_track', { action: 'delete', trackId: made.created[0].id }, ctx);
 assert.ok(!(await execTrackTool('edit_track', { action: 'list' }, ctx) as { id: string }[]).some((track) => track.id === made.created[0].id));
+// A caption track carrying caption DATA is still deletable — that data is the
+// track's only content and nothing else can clear it, so counting it as "not
+// empty" once made caption tracks impossible to remove by any route.
+draft.commands.setCaptions({ enabled: true, template: 'black-bar', pacing: 'phrase' }, caption.created[0].id);
+assert.ok(
+  !!captionsOnTrack(draft.getState(), caption.created[0].id),
+  'precondition: the caption track owns caption data',
+);
 await execTrackTool('edit_track', { action: 'delete', trackId: caption.created[0].id }, ctx);
+assert.ok(
+  !(await execTrackTool('edit_track', { action: 'list' }, ctx) as { id: string }[]).some((track) => track.id === caption.created[0].id),
+  'a caption track with caption data can be deleted',
+);
 await execTrackTool('edit_track', { action: 'delete', trackId: secondCaption.created[0].id }, ctx);
 
 // ── Lock: update lands, list reports it, edits freeze ──────────────────────
