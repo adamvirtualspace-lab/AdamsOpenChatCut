@@ -19,7 +19,8 @@ running editor and is loaded on demand with `load_skill`.
 
 ## Essentials
 
-1. Start OpenChatCut before connecting. The default MCP endpoint is
+1. Start OpenChatCut **before starting the agent session** — see "Startup
+   order" below. The default MCP endpoint is
    `http://localhost:5199/api/external-mcp/mcp`.
 2. Call `openchatcut_status`, then `list_projects`. Select a project only when
    the user names it or the current context identifies it.
@@ -35,6 +36,36 @@ running editor and is loaded on demand with `load_skill`.
    OpenChatCut. In auto mode, `review_edit_session` applies the complete draft.
 7. Finish with `review_edit_session`. Report success only after
    `get_edit_session` returns `applied`.
+
+## Startup order
+
+MCP tool schemas attach only when the agent session starts. If OpenChatCut is
+not already running at that moment, the `openchatcut` server fails its initial
+connect and **no `openchatcut_*` tools exist for the entire session** — the
+editor is reachable in a browser, but nothing can drive it. Starting the server
+later in the session does not backfill the tools.
+
+So the correct sequence is:
+
+```text
+start OpenChatCut  ->  start the agent session  ->  open the editor tab
+  ->  target_project  ->  ...
+```
+
+Two things that look like progress but are not:
+
+- `claude mcp list` reporting `openchatcut ✔ Connected` proves only that the
+  endpoint answers a fresh health-check connection. It says nothing about the
+  current session's toolset.
+- Re-registering the server (`claude mcp remove` / `add`) does not attach tools
+  to a session already underway — and `add` defaults to `--scope local`, which
+  writes `~/.claude.json` instead of the repo's tracked `.mcp.json` and drops
+  the required `x-openchatcut-mcp-client` / `x-openchatcut-mcp-surface`
+  headers. Restore `.mcp.json` from git rather than re-adding via the CLI.
+
+The only fix is a new agent session started while OpenChatCut is up. This is
+the mirror image of the stale-binding hazard below: one is caused by the editor
+starting too late, the other by the editor remounting too early.
 
 ## Call order and the reload hazard
 
