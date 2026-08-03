@@ -23,16 +23,42 @@ running editor and is loaded on demand with `load_skill`.
    `http://localhost:5199/api/external-mcp/mcp`.
 2. Call `openchatcut_status`, then `list_projects`. Select a project only when
    the user names it or the current context identifies it.
-3. Call `load_skill` before specialized work. It is read-only and requires
+3. Call `target_project` to bind this MCP transport session to the project.
+   The binding is permanent for the session and cannot be re-pointed.
+4. Call `load_skill` before specialized work. It is read-only and requires
    neither `begin_edit_session` nor `editSessionId`; available names and support
    files come from the live MCP tool description.
-4. Before project reads or edits, call `begin_edit_session`. Keep its
+5. Before project reads or edits, call `begin_edit_session`. Keep its
    `editSessionId` and pass it to every draft-safe editor tool.
-5. Use `approvalMode: "manual"` unless the user explicitly asks for unattended
+6. Use `approvalMode: "manual"` unless the user explicitly asks for unattended
    application. In manual mode, the user approves the complete proposal in
    OpenChatCut. In auto mode, `review_edit_session` applies the complete draft.
-6. Finish with `review_edit_session`. Report success only after
+7. Finish with `review_edit_session`. Report success only after
    `get_edit_session` returns `applied`.
+
+## Call order and the reload hazard
+
+Strict order, one step at a time:
+
+```text
+openchatcut_status -> list_projects -> target_project
+  -> load_skill (optional) -> begin_edit_session -> read/edit tools
+  -> review_edit_session -> get_edit_session
+```
+
+`target_project` binds to a specific `editorInstanceId`. Anything that
+remounts the editor page mints a new instance id and permanently invalidates
+the binding — every later call, including `openchatcut_status` and a repeat
+`target_project`, returns `stale`. Only a brand-new MCP session recovers it.
+
+Therefore, after the editor tab is open:
+
+- Never navigate, reload, or re-`preview_start` the editor URL. Navigating to
+  the URL the tab is already on still remounts it.
+- Read the editor through `read_page` / `get_page_text` / screenshots only.
+- Never batch `target_project` or `begin_edit_session` in the same parallel
+  call block as a browser navigation — the reload can land first.
+- Open the editor tab *before* `target_project`, never after.
 
 ## Skill version
 
