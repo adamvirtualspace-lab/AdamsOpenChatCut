@@ -25,7 +25,7 @@ import {
 } from './broker.ts';
 import { createExternalProject, listExternalProjects } from './projects.ts';
 
-export const OPENCHATCUT_SKILL_BASELINE = '2026-08-01.1';
+export const OPENCHATCUT_SKILL_BASELINE = '2026-08-03.1';
 export const MCP_SESSION_IDLE_LIMIT_MS = 60 * 60 * 1000;
 export const MCP_SESSION_COUNT_LIMIT = 64;
 
@@ -71,7 +71,7 @@ const CONTROL_TOOLS: Tool[] = [
   },
   {
     name: 'target_project',
-    description: 'Permanently bind this MCP transport session to one connected project/editor/revision.',
+    description: 'Bind this MCP transport session to one connected project. The project cannot change, but calling this again after a stale binding rebinds the session to the editor\'s current revision.',
     inputSchema: {
       type: 'object',
       properties: { projectId: { type: 'string' }, editorBaseUrl: { type: 'string' } },
@@ -205,20 +205,97 @@ function projectForRead(session: McpSession, requested: unknown): string {
   return projectId;
 }
 
+function sessionIsStale(session: McpSession): boolean {
+  return Boolean(session.staleReason)
+    || Boolean(session.binding && !editorBindingMatches(session.binding));
+}
+
+// Diagnostic only: this must answer even for a stale session, otherwise the one
+// tool that can explain the staleness is the one that cannot be called.
+function statusPayload(session: McpSession): unknown {
+  const stale = sessionIsStale(session);
+  // Latch the staleness even though we answer, so the session still cannot
+  // revive on its own if the old revision happens to reappear. Only an explicit
+  // target_project rebind clears it.
+  if (stale && session.binding && !session.staleReason) {
+    markSessionStale(
+      session,
+      `MCP session binding for project ${session.binding.projectId} is stale. Rebind with target_project.`,
+    );
+  }
+  return {
+    connectedProjectIds: connectedProjectIds(),
+    editors: editorStatuses(),
+    sessionBinding: session.binding,
+    stale,
+    staleReason: session.staleReason,
+    currentEditorBinding: session.binding ? editorBinding(session.binding.projectId) : null,
+    recovery: stale && session.binding
+      ? `Call target_project with projectId ${session.binding.projectId} to rebind this session to the editor's current revision, then begin_edit_session again.`
+      : null,
+    toolCount: mcpTools().length,
+  };
+}
+
+// A stale binding means the editor's revision moved (an autosave, a media
+// fallback, a user edit) — not that the transport is unusable. Rebinding to the
+// live revision recovers the session in place; drafts from the old revision stay
+// rejected because editSessionOwnerMatches compares the full binding.
+function targetProject(
+  session: McpSession,
+  args: Record<string, unknown>,
+  baseUrl: string,
+): unknown {
+  const projectId = requestedProjectId(args.projectId);
+  if (!projectId) throw new ExternalEditorCallError('rejected', 'projectId is required');
+  const previous = session.binding;
+  if (previous && previous.projectId !== projectId) {
+    throw new ExternalEditorCallError(
+      'rejected',
+      `This MCP session is bound to project ${previous.projectId}; it cannot operate project ${projectId}.`,
+    );
+  }
+  if (previous && sessionIsStale(session)) {
+    const live = editorBinding(projectId);
+    if (!live || !editorBindingMatches(live)) {
+      throw new ExternalEditorCallError(
+        'rejected',
+        `Project ${projectId} is not open in a connected OpenChatCut editor.`,
+      );
+    }
+    if (session.id) {
+      cancelEditorCallsForOwner(
+        session.id,
+        'stale',
+        session.staleReason ?? 'Binding rebound to a newer editor revision.',
+      );
+    }
+    session.binding = live;
+    session.staleReason = null;
+    return {
+      ok: true,
+      binding: live,
+      rebound: true,
+      previousBinding: previous,
+      note: 'Session rebound to the editor\'s current revision. Edit sessions started before the rebind are no longer valid; call begin_edit_session again.',
+      editorUrl: editorUrl(args, projectId, baseUrl),
+    };
+  }
+  const binding = bindSession(session, projectId);
+  return {
+    ok: true,
+    binding,
+    rebound: false,
+    editorUrl: editorUrl(args, binding.projectId, baseUrl),
+  };
+}
+
 async function callControlTool(
   session: McpSession,
   name: string,
   args: Record<string, unknown>,
   baseUrl: string,
 ): Promise<unknown | undefined> {
-  if (name === 'openchatcut_status') {
-    return {
-      connectedProjectIds: connectedProjectIds(),
-      editors: editorStatuses(),
-      sessionBinding: session.binding,
-      toolCount: mcpTools().length,
-    };
-  }
   if (name === 'list_projects') {
     const projects = await listExternalProjects(args.includeDeleted === true);
     return projects.map((project) => ({
@@ -235,12 +312,6 @@ async function callControlTool(
     }
     const project = await createExternalProject(args);
     return { ...project, editorUrl: editorUrl(args, project.id, baseUrl) };
-  }
-  if (name === 'target_project') {
-    const projectId = requestedProjectId(args.projectId);
-    if (!projectId) throw new ExternalEditorCallError('rejected', 'projectId is required');
-    const binding = bindSession(session, projectId);
-    return { ok: true, binding, editorUrl: editorUrl(args, binding.projectId, baseUrl) };
   }
   if (name === 'get_editor_url') {
     const projectId = projectForRead(session, args.projectId);
@@ -264,6 +335,9 @@ async function callTool(
       && session.binding
       && editSessionOwnerMatches(session.id, session.binding, args.editSessionId),
     );
+  // Both of these are recovery paths and must run before the staleness gate.
+  if (name === 'openchatcut_status') return statusPayload(session);
+  if (name === 'target_project') return targetProject(session, args, baseUrl);
   validateSessionBinding(session, allowRevisionDrift);
   const control = await callControlTool(session, name, args, baseUrl);
   if (control !== undefined) return control;
@@ -296,12 +370,12 @@ function makeServer(baseUrl: string, session: McpSession): Server {
       capabilities: { tools: { listChanged: true } },
       instructions: [
         `OpenChatCut external skill baseline: ${OPENCHATCUT_SKILL_BASELINE}. Update with npx skills update openchatcut when the installed skill is older.`,
-        'Bind this MCP transport with target_project before editing; the project, editor instance, and base revision cannot change within the session.',
+        'Bind this MCP transport with target_project before editing; the project cannot change within the session.',
         'After target_project, load_skill is read-only and can be called without begin_edit_session or editSessionId.',
         'Call begin_edit_session first with approvalMode manual (default) or auto, then pass its editSessionId to every draft-safe editor tool.',
         'Call review_edit_session when the draft is ready.',
         'Manual sessions wait for approval in OpenChatCut; auto sessions apply the complete draft during review_edit_session. Do not claim success until status is applied.',
-        'If a session becomes stale, cancelled, or failed, start a new MCP session instead of reusing it.',
+        'If a call returns stale, the editor revision moved underneath the binding: call target_project again with the same projectId to rebind, then begin_edit_session again. Drafts started before the rebind are rejected. Only start a new MCP session if the rebind itself fails.',
       ].join(' '),
     },
   );

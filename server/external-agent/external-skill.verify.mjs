@@ -8,7 +8,7 @@ const skillRoot = resolve(root, 'skills/openchatcut');
 const skillPath = resolve(skillRoot, 'SKILL.md');
 const skill = readFileSync(skillPath, 'utf8');
 
-assert.match(skill, /^---\nname: openchatcut\ndescription: .+\n---/);
+assert.match(skill, /^---\r?\nname: openchatcut\r?\ndescription: .+\r?\n---/);
 assert.ok(skill.split('\n').length <= 500, 'SKILL.md must stay within 500 lines');
 
 const references = [...skill.matchAll(/`(references\/[^`]+\.md)`/g)].map((match) => match[1]);

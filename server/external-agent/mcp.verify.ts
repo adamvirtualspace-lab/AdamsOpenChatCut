@@ -191,18 +191,54 @@ try {
   assert.equal(pendingEditorCallsForTest().length, 0, 'wrong-project calls never reach another editor queue');
 
   registerEditor(projectA, editorA, 'v2-mcp-project-a', editorTools);
-  const staleSession = await boundA.client.callTool({
+  const staleCall = await boundA.client.callTool({
+    name: dynamicTool.name,
+    arguments: {},
+  });
+  assert.equal(staleCall.isError, true);
+  assert.equal(callOutcome(staleCall), 'stale', 'every tool call revalidates editor instance and base revision');
+  // openchatcut_status is the diagnostic surface: it must answer for a stale
+  // session instead of erroring, or the staleness cannot be inspected.
+  const staleStatus = await boundA.client.callTool({
     name: 'openchatcut_status',
     arguments: {},
   });
-  assert.equal(staleSession.isError, true);
-  assert.equal(callOutcome(staleSession), 'stale', 'every tool call revalidates editor instance and base revision');
+  assert.notEqual(staleStatus.isError, true, 'status answers even when the binding is stale');
+  assert.equal((staleStatus.structuredContent as { stale?: boolean }).stale, true);
+  assert.ok(
+    (staleStatus.structuredContent as { recovery?: string | null }).recovery,
+    'status explains how to recover',
+  );
   registerEditor(projectA, editorA, revisionA, editorTools);
   const notRevived = await boundA.client.callTool({
-    name: 'openchatcut_status',
+    name: dynamicTool.name,
     arguments: {},
   });
   assert.equal(callOutcome(notRevived), 'stale', 'a stale transport cannot revive when an old binding reappears');
+
+  // A stale binding is recoverable in place: target_project rebinds to the
+  // editor's current revision without needing a whole new MCP session.
+  registerEditor(projectA, editorA, 'v3-mcp-project-a', editorTools);
+  const rebound = await boundA.client.callTool({
+    name: 'target_project',
+    arguments: { projectId: projectA },
+  });
+  assert.notEqual(rebound.isError, true, 'a stale session can rebind to the same project');
+  assert.equal((rebound.structuredContent as { rebound?: boolean }).rebound, true);
+  assert.deepEqual(
+    mcpSessionsForTest().find((session) => session.id === boundA.sessionId)?.binding,
+    { projectId: projectA, editorInstanceId: editorA, baseRevision: 'v3-mcp-project-a' },
+  );
+  assert.equal(
+    mcpSessionsForTest().find((session) => session.id === boundA.sessionId)?.staleReason,
+    null,
+    'rebinding clears the sticky stale reason',
+  );
+  // A rebind must never let the session address a different project.
+  assert.equal((await boundA.client.callTool({
+    name: 'target_project',
+    arguments: { projectId: projectB },
+  })).isError, true, 'rebinding cannot repoint the session at another project');
 
   const switchClient = await connectClient(mcpUrl, 'openchatcut-mcp-switch');
   clients.push(switchClient);
