@@ -3,7 +3,7 @@
 // Actions and presets/names/busy states are all here. The name is input inline, without window.prompt (Electron does not support it).
 // Exception for the error line: it is also written by the "Turn on captions" button outside the menu (there is no text script for this track), so it is passed in by Timeline.
 import { useEffect, useState } from 'react';
-import { CAPTION_STYLES } from './styles';
+import { CAPTION_STYLES, type CaptionStyleOverride } from './styles';
 import { buildTranslation } from './translate';
 import type { CaptionsData, CaptionTemplate } from './types';
 import { deleteCaptionPreset, listCaptionPresets, saveCaptionPreset, type CaptionPreset } from './presetStore';
@@ -12,6 +12,9 @@ import type { EditorCommands } from '../editor/store';
 import { useT } from '../i18n/locale';
 import { captionsForTrack } from './captionTrack';
 import { newManualCaptions } from './manualCaptions';
+import { CaptionFontPicker } from './CaptionFontPicker';
+import { effectivePreset } from './renderStyles';
+import { ensureFont } from '../fonts/googleFonts';
 
 const CAPTION_LANGS = ['English', '日本語', '한국어', 'Español', 'Français', 'Deutsch', 'Português'];
 
@@ -31,7 +34,12 @@ export function CaptionStyleMenu({ state, commands, trackId, pos, error, onError
   const [nameDraft, setNameDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [translateOpen, setTranslateOpen] = useState(false);
+  const [fontOpen, setFontOpen] = useState(false);
   const current = captionsOnTrack(state, trackId);
+  // What the caption actually renders in today: the template's face unless an
+  // override replaced it.
+  const currentFont = current ? effectivePreset(current).fontFamily : undefined;
+  const fontOverridden = Boolean(current?.styleOverride?.fontFamily);
   useEffect(() => {
     void listCaptionPresets().then(setPresets).catch(() => {});
   }, []);
@@ -42,6 +50,23 @@ export function CaptionStyleMenu({ state, commands, trackId, pos, error, onError
     else commands.setCaptions({ ...captions, template }, trackId);
     onError(null);
     onClose();
+  };
+  /** Write a styleOverride patch, enabling captions on first use like applyStyle. */
+  const patchOverride = (styleOverride: CaptionStyleOverride | undefined) => {
+    const captions = captionsForTrack(state, trackId) ?? newManualCaptions();
+    if (current) commands.updateCaptions({ enabled: true, styleOverride }, trackId);
+    else commands.setCaptions({ ...captions, enabled: true, styleOverride }, trackId);
+    onError(null);
+  };
+  /** Font is one field of styleOverride, so it layers over any template. The menu
+   *  stays open — picking is an audition, not a commit. */
+  const applyFont = (fontFamily: string) => {
+    void ensureFont(fontFamily).catch(() => {});
+    patchOverride({ ...(current?.styleOverride ?? {}), fontFamily });
+  };
+  const clearFont = () => {
+    const { fontFamily: _dropped, ...rest } = current?.styleOverride ?? {};
+    patchOverride(Object.keys(rest).length ? rest : undefined);
   };
   /** Save current captions look as a user preset (edit_captions preset_save). */
   const confirmSave = async (name: string) => {
@@ -131,6 +156,29 @@ export function CaptionStyleMenu({ state, commands, trackId, pos, error, onError
               </button>
             ))}
           </>
+        )}
+      </div>
+      <div className="cc-caption-font-wrap">
+        <button
+          type="button"
+          className="cc-caption-translate"
+          disabled={!current}
+          title={current ? t('为字幕选择字体') : t('请先启用字幕')}
+          onClick={() => setFontOpen((open) => !open)}
+          aria-expanded={fontOpen}
+        >
+          <span className="cc-caption-style-swatch" style={{ fontFamily: currentFont ? `'${currentFont}'` : undefined }}>Aa</span>
+          <span>{t('字体')}</span>
+          <span className="cc-caption-font-current">{fontOverridden ? currentFont : t('跟随模板')}</span>
+          <span>{fontOpen ? '⌄' : '›'}</span>
+        </button>
+        {fontOpen && current && (
+          <CaptionFontPicker
+            current={currentFont}
+            overridden={fontOverridden}
+            onPick={applyFont}
+            onClear={clearFont}
+          />
         )}
       </div>
       {nameDraft !== null ? (
