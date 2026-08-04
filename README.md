@@ -100,6 +100,32 @@ OpenChatCut is built for creators and developers who want AI to participate in t
 - 📦 **Production-ready exports**: MP4, audio, captions, FCPXML, and complete project data.
 - 🖥️ **Local-first**: projects and media stay on your machine by default, while API keys remain server-side.
 
+
+
+---
+
+## What is OpenChatCut?
+
+OpenChatCut is an **open-source ChatCut alternative**: a video editor that brings **conversational agents** and **professional timeline editing** into the same workspace. It is independent open source (AGPL), not affiliated with the commercial ChatCut product.
+
+**OpenChatCut = local video projects + multitrack timeline + AI agents + MCP + production-ready exports.**
+
+It does not merely generate a video that can no longer be changed. Every edit is written to real tracks, clips, transitions, captions, effects, and media inside the project. You can continue editing manually, undo or redo changes, save versions, or hand the project to another agent.
+
+OpenChatCut is built for creators and developers who want AI to participate in the actual editing workflow without giving up professional control, rather than starting over from an empty chat box or an immutable generated result.
+
+- Website: [https://openchatcut.com](https://openchatcut.com)
+- Open-source ChatCut alternative guide: [https://openchatcut.com/blog/open-source-chatcut-alternative](https://openchatcut.com/blog/open-source-chatcut-alternative)
+- ChatCut vs OpenChatCut: [https://openchatcut.com/blog/chatcut-vs-openchatcut](https://openchatcut.com/blog/chatcut-vs-openchatcut)
+
+- 🤖 **Agent-native**: the built-in agent and external MCP agents share the same editing tools.
+- 🎞️ **Real timeline**: multiple video and audio tracks, transitions, effects, LUTs, zooms, and keyframes.
+- 📝 **Transcript-driven editing**: word-level transcription (cloud **or** local/offline Whisper), SRT/VTT import, text-based cuts, pause handling, speakers, and linked captions.
+- ✨ **Generation and media**: images, video, speech, music, sound effects, and online media search.
+- 🧩 **Motion Graphics and WebGL**: editable motion templates, custom shaders, visual effects, and transitions.
+- 📦 **Production-ready exports**: MP4, audio, captions, FCPXML, and complete project data.
+- 🖥️ **Local-first**: projects and media stay on your machine by default, while API keys remain server-side.
+
 ## Community
 
 Join the OpenChatCut community to discuss workflows, share feedback, and follow development:
