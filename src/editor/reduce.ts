@@ -854,7 +854,11 @@ function applyAction(s: TimelineState, a: Action): TimelineState {
                 // A retained stale transcript used a different source revision (and,
                 // while stale, media-frame coordinates). Its old trim cannot be
                 // reinterpreted as an offset into the new packed word stream.
-                srcInFrame: it.transcriptStale === true ? 0 : it.srcInFrame,
+                // Only WORD-DRIVEN AUDIO indexes srcInFrame into that stream, so only
+                // it rebases — same `kind === 'audio'` gate splitTimelineItem uses. On a
+                // video clip srcInFrame is a media offset: zeroing it rewound every
+                // trimmed segment to the head of the source and destroyed the edit.
+                srcInFrame: it.transcriptStale === true && it.kind === 'audio' ? 0 : it.srcInFrame,
                 deletedWordIdx: [],
                 silenceFrames: undefined,
                 gapCapsMs: undefined,
