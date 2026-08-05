@@ -20,6 +20,11 @@ export default {
   '删除文字稿': 'Delete transcript',
   '删除该轨的文字稿（可撤销）': 'Delete this track\'s transcript (undoable)',
   '该轨还没有文字稿': 'This track has no transcript yet',
+  // TranscriptPanel — retranscribe every clip on the track in one pass
+  '重新转写整条时间线': 'Retranscribe full timeline',
+  '对该轨全部 {n} 段逐一转写（比单段的「重新转写」更慢，但会覆盖每一段）':
+    'Transcribe all {n} clips on this track (slower than the single-clip "Re-transcribe", but covers every one)',
+  '{n} 段共用的素材': 'source shared by {n} clips',
   '确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销':
     'Confirm: delete {n} transcript(s)? Word cuts and pause edits will be undone too',
   // segment.ts — speaker labels shown above each group in the transcript views

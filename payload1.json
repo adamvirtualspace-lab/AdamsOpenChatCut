@@ -1,0 +1,10 @@
+{"jsonrpc":"2.0","id":50,"method":"tools/call","params":{"name":"edit_item","arguments":{
+  "editSessionId":"12c6441c-5e1c-4244-82d1-12b2722aa7bf",
+  "adds":[
+    {"type":"video","assetId":"a1c0a98a-92e2-4882-a676-b194634c5b7f","track":"V1","fromFrame":0,"durationInFrames":210},
+    {"type":"video","assetId":"a1c0a98a-92e2-4882-a676-b194634c5b7f","track":"V1","fromFrame":210,"durationInFrames":360},
+    {"type":"video","assetId":"a1c0a98a-92e2-4882-a676-b194634c5b7f","track":"V1","fromFrame":570,"durationInFrames":210}
+  ],
+  "ripple": true,
+  "validateOnly": true
+}}}
