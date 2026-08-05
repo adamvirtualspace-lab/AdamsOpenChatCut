@@ -7,10 +7,10 @@ set PORT=5199
 set URL=http://localhost:%PORT%/
 set MCP=http://localhost:%PORT%/api/external-mcp/mcp
 
-echo ==========================================================
+echo ========================================================================
 echo   OpenChatCut launcher
-echo   Run this BEFORE opening Claude Desktop.
-echo ==========================================================
+echo   Run this BEFORE opening Claude Desktop or Other AI Coding Platform.
+echo ========================================================================
 echo.
 
 REM --- Already up? Then don't start a second one. ---
@@ -20,6 +20,19 @@ if "!CODE!"=="200" (
     echo [ok] OpenChatCut is already running on port %PORT%.
     set STARTED=0
     goto ready
+)
+
+if not exist "node_modules" (
+    echo [..] node_modules not found - running npm install first...
+    call npm install
+    if errorlevel 1 (
+        echo [!!] npm install failed. Fix the error above and re-run this launcher.
+        pause
+        endlocal
+        exit /b 1
+    )
+    echo [ok] Dependencies installed.
+    echo.
 )
 
 echo [..] Starting dev server on port %PORT% ...
@@ -50,13 +63,34 @@ if "!MCODE!"=="200" (
     echo   The editor may still be booting. Wait a few seconds and re-run.
 )
 echo.
-echo ==========================================================
-echo   You can open Claude Desktop NOW.
-echo   Any session you start from here on will have the
-echo   openchatcut_* tools attached.
-echo ==========================================================
+echo ========================================================================
+echo   OpenChatCut is running. Now connect your AI coding agent:
+echo ========================================================================
+echo.
+echo   IF YOU USE CLAUDE CODE (terminal):
+echo     Just run "claude" from this folder. This repo already has a
+echo     .mcp.json, so the openchatcut_* tools attach automatically -
+echo     nothing else to do.
+echo.
+echo   IF YOU USE CLAUDE DESKTOP or ANOTHER AGENT:
+echo     Register the MCP server once, from a terminal (not the chat box):
+echo       claude mcp add --transport http openchatcut %MCP%
+echo     ^(Claude Desktop instead: Settings -^> Developer -^> Edit Config,
+echo      add an "openchatcut" entry pointing at %MCP%, then restart it.^)
+echo.
+echo   THEN, in the chat, describe the actual edit you want, e.g.:
+echo     "Start an OpenChatCut edit session and add a jump cut at 12s.
+echo      Submit for review and wait for me to approve it in OpenChatCut."
+echo ========================================================================
 echo.
 echo   Editor: %URL%
+echo.
+set /p OPENBROWSER="Edit Video on %URL% in your browser now? [Y/N]: "
+if /i "!OPENBROWSER!"=="Y" (
+    start "" "%URL%"
+) else (
+    echo   Skipping browser launch - use your own AI coding platform / browser tab.
+)
 echo.
 if "!STARTED!"=="1" (
     echo   Leave this window OPEN while you work.
