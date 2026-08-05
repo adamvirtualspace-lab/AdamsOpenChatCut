@@ -123,12 +123,41 @@ export function TranscriptPanel({
 
   const transcribeTrack = async () => {
     if (!clips.length) return;
-    const jobs = clips.map((c) => ({ path: c.src!, itemId: c.id, label: clipLabel(c) }));
+    // One job per unique underlying FILE, not per timeline clip. A cut-down
+    // track can have dozens of trimmed clips that all point at the same
+    // physical media (a "combed" recording split into keep-segments); ASR
+    // providers always transcribe the whole file regardless of what's asked,
+    // so per-clip jobs used to mean re-transcribing the entire source once
+    // per clip (59 clips from one recording -> 59 full-length runs). Group by
+    // `src` and transcribe each file once.
+    //
+    // The same whole-file word list (file-relative ms, untouched) is then
+    // stored on every clip that shares that file — NOT sliced or rebased.
+    // mediaWindowWords/mediaWindowKeptIndices (transcript/edit.ts), used by
+    // caption building and word click-to-delete, window a video clip's words
+    // themselves via item.srcInFrame and expect file-relative timestamps to
+    // do it; rebasing to clip-relative here would make every clip whose
+    // srcInFrame isn't 0 filter out its own words as "outside the window".
+    const bySrc = new Map<string, typeof clips>();
+    for (const c of clips) {
+      if (!c.src) continue;
+      const group = bySrc.get(c.src);
+      if (group) group.push(c);
+      else bySrc.set(c.src, [c]);
+    }
+    const jobs = [...bySrc.entries()].map(([path, group]) => ({
+      path,
+      // Repurposed as the lookup key into bySrc below, not a real item id —
+      // runMany only threads it through to onEach and UI progress text.
+      itemId: path,
+      label: group.length > 1 ? t('{n} 段共用的素材', { n: group.length }) : clipLabel(group[0]!),
+    }));
     reset();
     try {
-      await runMany(jobs, (itemId, r) => {
-        onSetItemTranscript(itemId, r.words);
-        setFocusItemId(itemId);
+      await runMany(jobs, (path, r) => {
+        const group = bySrc.get(path) ?? [];
+        for (const item of group) onSetItemTranscript(item.id, r.words);
+        if (group[0]) setFocusItemId(group[0].id);
       });
     } catch { /* hook holds error */ }
   };
@@ -222,6 +251,16 @@ export function TranscriptPanel({
           {confirmDelete
             ? t('确认删除 {n} 段文字稿？删词与停顿编辑会一并撤销', { n: transcribed.length })
             : t('删除文字稿')}
+        </button>
+        <button
+          type="button"
+          className="cc-tx-btn"
+          disabled={busy || !clips.length}
+          title={t('对该轨全部 {n} 段逐一转写（比单段的「重新转写」更慢，但会覆盖每一段）', { n: clips.length })}
+          onClick={() => void transcribeTrack()}
+        >
+          <Icon name="history" size={13} />
+          {busy ? (progressNote ?? t('转写中…')) : t('重新转写整条时间线')}
         </button>
         <button
           type="button"
