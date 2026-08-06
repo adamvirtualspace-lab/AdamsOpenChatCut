@@ -227,6 +227,36 @@ assert.equal(
     freshTimeline.items,
     freshTimeline.fps,
   ).length > 0, 'fresh current-source transcript restores caption generation');
+
+  // A clip cut AFTER the relink picked its in-point against the CURRENT bytes, so
+  // transcribing must not re-base it. It inherits the asset's retained stale words
+  // (transcriptStale) without inheriting srcWindowStale, which is what separates it
+  // from the relinked clip above. Regression: teaser clips cut from the middle of a
+  // recording all collapsed to frame 0 — playing identical footage from the head of
+  // the file — the first time the timeline was re-transcribed.
+  const addedAfterRelink = projectReduce(relinkedAudio, {
+    type: 'add',
+    startFrame: 40,
+    item: {
+      id: 'clip_after_relink',
+      track: 'A1',
+      durationInFrames: 30,
+      name: 'Voice',
+      kind: 'audio',
+      src: '/media/uploads/voice-new.wav',
+      srcInFrame: 120,
+      sourceRevision: newAudioRevision,
+      transcript: oldWords,
+      transcriptStale: true,
+    },
+  });
+  const addedItem = activeTimeline(addedAfterRelink).items.find((it) => it.id === 'clip_after_relink');
+  assert.equal(addedItem?.srcWindowStale, undefined, 'a clip added after the relink has no stale source window');
+  const rescanned = projectReduce(addedAfterRelink, { type: 'setItemTranscript', id: 'clip_after_relink', words: freshWords });
+  const rescannedItem = activeTimeline(rescanned).items.find((it) => it.id === 'clip_after_relink');
+  assert.equal(rescannedItem?.srcInFrame, 120, 'transcribing keeps an in-point picked against the current source');
+  assert.equal(hasOperationalTranscript(rescannedItem), true, 'the clip still gains an operational transcript');
+  assert.equal(freshItem.srcWindowStale, undefined, 'the relinked clip clears its stale-window marker once re-transcribed');
 }
 
 // A derivative captures the revision when it starts. Relinking before completion

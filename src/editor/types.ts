@@ -252,6 +252,12 @@ export interface TimelineItem {
   transcript?: TranscriptWord[];
   /** Relink preserved the transcript for review, but it no longer matches source bytes. */
   transcriptStale?: boolean;
+  /** Relink swapped the bytes under a clip that was already trimmed, so its
+   * srcInFrame indexes the OLD source. Only a relink sets this; the next
+   * transcription resets the in-point and clears it (setItemTranscript).
+   * A clip created AFTER the relink never carries it — its in-point was picked
+   * against the current source and must survive transcription. */
+  srcWindowStale?: boolean;
   deletedWordIdx?: number[];
   /** text-only translation / correction variants of `transcript`. Each keys words
    * by their SOURCE index and carries only text — timing always comes from the

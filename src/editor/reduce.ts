@@ -851,10 +851,16 @@ function applyAction(s: TimelineState, a: Action): TimelineState {
                 ...it,
                 transcript: a.words,
                 transcriptStale: false,
-                // A retained stale transcript used a different source revision (and,
-                // while stale, media-frame coordinates). Its old trim cannot be
-                // reinterpreted as an offset into the new packed word stream.
-                srcInFrame: it.transcriptStale === true ? 0 : it.srcInFrame,
+                // Only a relink invalidates the in-point: it swapped the bytes under
+                // an already-trimmed clip, so the old offset indexes content that is
+                // no longer there and cannot be reinterpreted against the new packed
+                // word stream. transcriptStale is NOT that signal — a clip added
+                // after a relink inherits the asset's stale words while its own
+                // in-point was picked against the current source, so keying off it
+                // silently zeroed real trims (teaser clips cut from the middle of a
+                // recording all collapsed to the head of the file on re-transcribe).
+                srcInFrame: it.srcWindowStale === true ? 0 : it.srcInFrame,
+                srcWindowStale: undefined,
                 deletedWordIdx: [],
                 silenceFrames: undefined,
                 gapCapsMs: undefined,
@@ -1297,6 +1303,9 @@ export function projectReduce(p: ProjectDoc, a: AnyAction): ProjectDoc {
             height: a.height ?? item.height,
             durationInFrames: a.durationInFrames ?? item.durationInFrames,
             transcriptStale: item.transcript?.length ? true : item.transcriptStale,
+            // This clip's srcInFrame was chosen against the bytes we just replaced,
+            // so the next transcription re-bases it (see setItemTranscript).
+            srcWindowStale: item.transcript?.length ? true : item.srcWindowStale,
           };
         };
         return {
