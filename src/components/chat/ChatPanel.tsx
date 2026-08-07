@@ -144,6 +144,11 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
   const streamingThinking = running && lastMsg?.role === 'assistant' && !!lastMsg.thinking && !lastMsg.text;
   const visibleFrom = Math.max(0, messages.length - visibleMessageCount);
   const visibleMessages = messages.slice(visibleFrom);
+  // An external (MCP) agent proposes without ever posting a chat message, so the
+  // message list stays empty — the onboarding guide would otherwise sit next to
+  // the proposal card in the centered empty layout and push it out of view.
+  const hasPendingCard = !!proposal || !!externalProposal.proposal || !!pendingGuard;
+  const showOnboarding = messages.length === 0 && !hasPendingCard && !running;
 
   // @-referenceable things: media-pool assets + template library
   const references: RefItem[] = [
@@ -153,7 +158,7 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [messages, running, proposal]);
+  }, [messages, running, proposal, externalProposal.proposal, pendingGuard]);
 
   // library "generated with AI" seeds the composer (attaches the template as a chat ref)
   useEffect(() => {
@@ -284,8 +289,8 @@ export function ChatPanel({ ctx, projectId, collapsed, onToggleCollapse, onPrevi
       </div>
 
       {/* messages */}
-      <div ref={scrollRef} className={`cc-chat-messages${messages.length === 0 ? ' empty' : ''}`}>
-        {messages.length === 0 && (
+      <div ref={scrollRef} className={`cc-chat-messages${showOnboarding ? ' empty' : ''}`}>
+        {showOnboarding && (
           <div className="cc-chat-onboarding">
             <div className="cc-chat-onboarding-kicker">{t('从这里开工')}</div>
             <h2>{t('从一个剪辑目标开始')}</h2>
